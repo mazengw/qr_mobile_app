@@ -15,6 +15,7 @@ import flet_video as ftv
 from app.api import ApiError, VaultAPI
 from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_text_control, wrap_selection
 from app.offline import OfflineStore, is_network_error
+from app.paths import downloads_dir
 from app.state import Session
 from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
 
@@ -2606,7 +2607,7 @@ class QRVaultApp:
         )
 
     def _save_cached_copy(self, path: Path, name: str):
-        dest = Path.home() / "Downloads" / "qr_vault" / name
+        dest = downloads_dir() / name
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(path.read_bytes())
@@ -2685,7 +2686,7 @@ class QRVaultApp:
             self.go_storage()
 
     async def _download(self, storage_id: int, file_id: int, name: str):
-        dest = Path.home() / "Downloads" / "qr_vault" / name
+        dest = downloads_dir() / name
         try:
             # Pending local file
             if isinstance(file_id, str) and str(file_id).startswith("local-file-"):

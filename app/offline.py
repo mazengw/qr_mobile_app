@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .paths import offline_dir
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -46,7 +48,7 @@ def is_network_error(exc: BaseException) -> bool:
 
 class OfflineStore:
     """
-    Disk layout under ~/.qr_vault_offline/:
+    Disk layout under <app_data>/offline/:
       queue.json                  — pending note + file upload ops
       home_storages.json          — last known home vault list
       snapshots/{storage_id}.json — last known storage + files + notes meta
@@ -55,7 +57,7 @@ class OfflineStore:
     """
 
     def __init__(self, root: Path | None = None):
-        self.root = root or (Path.home() / ".qr_vault_offline")
+        self.root = root or offline_dir()
         self.queue_path = self.root / "queue.json"
         self.home_path = self.root / "home_storages.json"
         self.snapshots_dir = self.root / "snapshots"

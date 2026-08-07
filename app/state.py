@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .paths import session_path
+
 
 class Session:
     def __init__(self, path: Path | None = None):
-        self.path = path or (Path.home() / ".qr_vault_session.json")
+        self.path = path or session_path()
         self.access: str | None = None
         self.refresh: str | None = None
         self.user: dict[str, Any] | None = None
@@ -33,6 +35,7 @@ class Session:
             pass
 
     def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(
                 {

@@ -84,11 +84,9 @@ Dev OTP: `123456`
 
 
 
-- Downloads go to `~/Downloads/qr_vault/`
-
-- Session saved at `~/.qr_vault_session.json`
-
-- Offline queue + cache at `~/.qr_vault_offline/` (home list, vault snapshots, file blobs, note sync queue)
-
+- App data uses a writable store: `FLET_APP_STORAGE_DATA` on Android/iOS, or `~/.qr_vault/` on desktop
+- Downloads go to `<app_data>/downloads/`
+- Session saved at `<app_data>/session.json`
+- Offline queue + cache at `<app_data>/offline/` (home list, vault snapshots, file blobs, note sync queue)
 - Camera QR scanning can be added later; current scan screen accepts the QR payload text (same value the mobile camera would decode)
 
