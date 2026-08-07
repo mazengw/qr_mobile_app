@@ -1,18 +1,14 @@
 name: All Builds (Linux, macOS, Windows, Android, IPA, APK, AAB)
 
 on:
-  # Runs on push to any of the below branches
   push:
     branches:
       - master
       - main
-  # Runs on pull request events that target one of the below branches
   pull_request:
     branches:
       - master
       - main
-
-  # Allows you to run this workflow manually from the Actions tab of the repository
   workflow_dispatch:
 
 env:
@@ -20,7 +16,9 @@ env:
   BUILD_NUMBER: 1
   BUILD_VERSION: 1.0.0
   PYTHON_VERSION: 3.12.2
-  FLUTTER_VERSION: 3.22.2
+  # Must match flet 0.86.x required Flutter (your venv: 3.44.8)
+  FLUTTER_VERSION: "3.44.8"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
 
 jobs:
   build-linux:
@@ -44,6 +42,8 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
 
     - name: Patch for linux build
       run: |
@@ -54,8 +54,10 @@ jobs:
 
     - name: Flet Build Linux
       run: |
-        flutter config --no-analytics 
-        flet build linux --verbose --build-number=$BUILD_NUMBER --build-version=$BUILD_VERSION
+        flutter config --no-analytics
+        flet build linux --yes --verbose --no-rich-output \
+          --build-number=$BUILD_NUMBER \
+          --build-version=$BUILD_VERSION
 
     - name: Upload Linux Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -86,11 +88,15 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
 
     - name: Flet Build macOS
       run: |
         flutter config --no-analytics
-        flet build macos --verbose --build-number=$BUILD_NUMBER --build-version=$BUILD_VERSION
+        flet build macos --yes --verbose --no-rich-output \
+          --build-number=$BUILD_NUMBER \
+          --build-version=$BUILD_VERSION
 
     - name: Upload macOS Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -121,11 +127,16 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
 
     - name: Flet Build Windows
+      shell: pwsh
       run: |
         flutter config --no-analytics
-        flet build windows --verbose --no-rich-output --build-number=$env:BUILD_NUMBER --build-version=$env:BUILD_VERSION
+        flet build windows --yes --verbose --no-rich-output `
+          --build-number=$env:BUILD_NUMBER `
+          --build-version=$env:BUILD_VERSION
 
     - name: Upload Windows Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -156,11 +167,21 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4.2.1
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
     - name: Flet Build AAB
       run: |
         flutter config --no-analytics
-        flet build aab --verbose --build-number=$BUILD_NUMBER --build-version=$BUILD_VERSION
+        flet build aab --yes --verbose --no-rich-output \
+          --build-number=$BUILD_NUMBER \
+          --build-version=$BUILD_VERSION
 
     - name: Upload AAB Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -191,17 +212,21 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
 
     - name: Setup Java JDK
       uses: actions/setup-java@v4.2.1
       with:
         distribution: 'temurin'
-        java-version: '21'
+        java-version: '17'
 
     - name: Flet Build APK
       run: |
         flutter config --no-analytics
-        flet build apk --verbose --build-number=$BUILD_NUMBER --build-version=$BUILD_VERSION
+        flet build apk --yes --verbose --no-rich-output \
+          --build-number=$BUILD_NUMBER \
+          --build-version=$BUILD_VERSION
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -232,11 +257,15 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
+        channel: stable
+        cache: true
 
     - name: Flet Build IPA
       run: |
         flutter config --no-analytics
-        flet build ipa --verbose --build-number=$BUILD_NUMBER --build-version=$BUILD_VERSION 
+        flet build ipa --yes --verbose --no-rich-output \
+          --build-number=$BUILD_NUMBER \
+          --build-version=$BUILD_VERSION
 
     - name: Upload IPA Artifact
       uses: actions/upload-artifact@v4.3.4
@@ -244,4 +273,4 @@ jobs:
         name: ipa-build-artifact
         path: build/ipa
         if-no-files-found: warn
-        overwrite: fals
+        overwrite: false
