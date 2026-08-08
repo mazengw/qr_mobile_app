@@ -169,6 +169,73 @@ _STRINGS: dict[str, dict[str, str]] = {
     "icons_view": {"en": "Icons view", "ar": "عرض أيقونات"},
     "cancel": {"en": "Cancel", "ar": "إلغاء"},
     "save": {"en": "Save", "ar": "حفظ"},
+    "info": {"en": "Info", "ar": "معلومة"},
+    "open_with_app": {"en": "Open with app", "ar": "فتح بتطبيق"},
+    "pdf_mobile_hint": {
+        "en": "Could not load PDF pages from the server. Open with a PDF app, or download a copy.",
+        "ar": "تعذّر تحميل صفحات PDF من السيرفر. افتحها بتطبيق PDF أو نزّل نسخة.",
+    },
+    "pdf_browse": {"en": "Browse pages", "ar": "تصفح الصفحات"},
+    "pdf_official": {"en": "PDF.js viewer", "ar": "عارض PDF.js"},
+    "pdf_open_viewer": {"en": "Open PDF viewer", "ar": "فتح عارض PDF"},
+    "pdf_tap_to_open": {
+        "en": "Open the standard PDF viewer (search, zoom, highlight).",
+        "ar": "افتح عارض PDF القياسي (بحث، تكبير، تظليل).",
+    },
+    "pdf_opened_external": {
+        "en": "PDF opened in the browser viewer.",
+        "ar": "تم فتح PDF في عارض المتصفح.",
+    },
+    "pdf_external_hint": {
+        "en": "Use the browser toolbar for search, zoom, and page navigation. Keep this app open.",
+        "ar": "استخدم شريط أدوات المتصفح للبحث والتكبير والتنقل. أبقِ التطبيق مفتوحاً.",
+    },
+    "pdf_reopen": {"en": "Reopen viewer", "ar": "إعادة فتح العارض"},
+    "pdf_open_failed": {
+        "en": "Could not open PDF. Try Download from the menu.",
+        "ar": "تعذّر فتح ملف PDF. جرّب التنزيل من القائمة.",
+    },
+    "pdf_render_error": {"en": "PDF render error: {error}", "ar": "خطأ عرض PDF: {error}"},
+    "help_p1": {
+        "en": "Scan a QR code to open or create a storage vault.",
+        "ar": "امسح رمز QR لفتح خزنة أو إنشائها.",
+    },
+    "help_p2": {
+        "en": "Permissions: read (view/download), write (upload/archive/delete), manage (share).",
+        "ar": "الصلاحيات: قراءة (عرض/تنزيل)، كتابة (رفع/أرشفة/حذف)، إدارة (مشاركة).",
+    },
+    "help_p3": {
+        "en": "Sharing sends a request. The other user must Accept on Home before the vault appears under Shared.",
+        "ar": "المشاركة ترسل طلباً. يجب أن يقبل الطرف الآخر من الرئيسية قبل ظهور الخزنة ضمن المشارَك.",
+    },
+    "help_p4": {
+        "en": "Long-press an item to reorder vaults on Home, and files/notes inside a storage (All + list view).",
+        "ar": "اضغط مطولاً على عنصر لإعادة ترتيب الخزائن في الرئيسية، والملفات/الملاحظات داخل الخزنة (الكل + عرض قائمة).",
+    },
+    "help_p5": {
+        "en": "Add Note places a rich note in the list with files. Edit bold/colors/sizes; filter with the Notes chip.",
+        "ar": "إضافة ملاحظة تضع ملاحظة غنية مع الملفات. عدّل الخط/الألوان/الحجم؛ صفِّ عبر شريحة الملاحظات.",
+    },
+    "help_p6": {
+        "en": "Archive hides a file from the main list. Open Archived to restore or permanently delete it.",
+        "ar": "الأرشفة تخفي الملف من القائمة. افتح الأرشيف للاستعادة أو الحذف النهائي.",
+    },
+    "help_p7": {
+        "en": "Retention: every file is permanently deleted 30 days after upload (even if archived). Download anything you need to keep.",
+        "ar": "الاحتفاظ: يُحذف كل ملف نهائياً بعد 30 يوماً من الرفع (حتى المؤرشف). نزّل ما تريد الاحتفاظ به.",
+    },
+    "help_p8": {
+        "en": "Tap a file to preview/play it. On phone, PDFs open with your PDF app.",
+        "ar": "اضغط ملفاً للمعاينة/التشغيل. على الهاتف تُفتح ملفات PDF عبر تطبيق PDF لديك.",
+    },
+    "help_p9": {
+        "en": "Browse modes: List (preview under the row) or Icons (full-screen open).",
+        "ar": "أوضاع التصفح: قائمة (معاينة تحت الصف) أو أيقونات (فتح بملء الشاشة).",
+    },
+    "help_p10": {
+        "en": "Merge PDF: combine selected PDFs and/or images into one PDF. Optionally archive the source files after merge.",
+        "ar": "دمج PDF: اجمع ملفات PDF و/أو صوراً في ملف واحد. يمكن أرشفة المصادر بعد الدمج.",
+    },
 }
 
 

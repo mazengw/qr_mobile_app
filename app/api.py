@@ -218,6 +218,26 @@ class VaultAPI:
             dest.write_bytes(r.content)
             return dest
 
+    def pdf_preview_meta(self, storage_id: int, file_id: int) -> dict:
+        with httpx.Client(timeout=60) as client:
+            r = client.get(
+                self._url(f"/api/storages/{storage_id}/files/{file_id}/preview/"),
+                headers=self._headers(),
+            )
+            return self._handle(r)
+
+    def pdf_preview_page(self, storage_id: int, file_id: int, page: int, dest: Path) -> Path:
+        with httpx.Client(timeout=90) as client:
+            r = client.get(
+                self._url(f"/api/storages/{storage_id}/files/{file_id}/preview/{page}/"),
+                headers=self._headers(),
+            )
+            if not r.is_success:
+                self._handle(r)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(r.content)
+            return dest
+
     def archive_file(self, storage_id: int, file_id: int, archived: bool = True) -> dict:
         with httpx.Client(timeout=30) as client:
             r = client.patch(

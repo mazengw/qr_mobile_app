@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
+import webbrowser
 from pathlib import Path
 
 import flet as ft
@@ -18,6 +19,7 @@ from app.i18n import LANG_AR, LANG_EN, normalize_lang, t
 from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_text_control, wrap_selection
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
+from app.pdf_viewer_html import can_serve_pdf, prepare_pdf_viewer_dir, start_pdf_viewer_server
 from app.qr_decode import decode_qr_payload
 from app.state import Session
 from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
@@ -31,6 +33,11 @@ try:
     import flet_permission_handler as fph
 except ImportError:  # pragma: no cover
     fph = None
+
+try:
+    import flet_webview as fwv
+except ImportError:  # pragma: no cover - optional until requirements install
+    fwv = None
 
 
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "qr_vault_preview"
@@ -65,7 +72,7 @@ def is_pdf(content_type: str, name: str = "") -> bool:
     return ct == "application/pdf" or Path(name).suffix.lower() == ".pdf"
 
 
-def render_pdf_pages(pdf_path: Path, max_pages: int = 40) -> list[Path]:
+def render_pdf_pages(pdf_path: Path, max_pages: int = 40, *, scale: float = 1.8) -> list[Path]:
     """Render PDF pages to PNGs when pypdfium2 is available (desktop).
 
     APK builds cannot ship pypdfium2 — it has no Android wheel on pypi.flet.dev
@@ -79,7 +86,8 @@ def render_pdf_pages(pdf_path: Path, max_pages: int = 40) -> list[Path]:
             "Install: pip install -r requirements-desktop.txt"
         ) from exc
 
-    out_dir = PREVIEW_DIR / f"pdf_{pdf_path.stem}_{pdf_path.stat().st_size}"
+    scale_tag = f"s{int(round(scale * 100))}"
+    out_dir = PREVIEW_DIR / f"pdf_{pdf_path.stem}_{pdf_path.stat().st_size}_{scale_tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = pdfium.PdfDocument(str(pdf_path))
     paths: list[Path] = []
@@ -89,7 +97,7 @@ def render_pdf_pages(pdf_path: Path, max_pages: int = 40) -> list[Path]:
             out = out_dir / f"page_{i + 1:03d}.png"
             if not out.exists():
                 page = doc[i]
-                bitmap = page.render(scale=1.8)
+                bitmap = page.render(scale=scale)
                 bitmap.to_pil().save(out, format="PNG")
             paths.append(out)
     finally:
@@ -155,6 +163,7 @@ class QRVaultApp:
         self._scan_last_decode = 0.0
         self._scan_status: ft.Text | None = None
         self._scan_qr_field: ft.TextField | None = None
+        self._pdf_server = None  # local HTTP server for official PDF.js viewer
 
         self.snack = ft.SnackBar(content=ft.Text(""), bgcolor=C.surface_alt)
         self.page.overlay.append(self.snack)
@@ -191,6 +200,120 @@ class QRVaultApp:
     def _lang_button(self) -> ft.Control:
         label = self._("lang_switch_to_en") if normalize_lang(self.session.lang) == LANG_AR else self._("lang_switch_to_ar")
         return ghost_button(label, self._toggle_language, ft.Icons.TRANSLATE)
+
+    def _show_info_dialog(self, title: str, paragraphs: list[str]):
+        """Mobile-friendly info panel (replaces unreliable tooltips)."""
+
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        body = [p for p in paragraphs if p]
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.surface,
+            title=ft.Text(title or self._("info"), color=C.text, weight=ft.FontWeight.W_700),
+            content=ft.Container(
+                width=340,
+                content=ft.Column(
+                    [muted(p) for p in body],
+                    spacing=10,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                height=min(420, max(140, 48 + 42 * len(body))),
+            ),
+            actions=[
+                ft.Button(content=self._("got_it"), on_click=close, bgcolor=C.primary, color=C.bg),
+            ],
+        )
+        self.page.show_dialog(dialog)
+
+    def _info_button(self, tip_key: str, title_key: str = "info") -> ft.Control:
+        """Info icon that looks like the old tooltip control, but opens a Help-style dialog."""
+        tip = self._(tip_key)
+        title = self._(title_key)
+        return ft.IconButton(
+            icon=ft.Icons.INFO_OUTLINE,
+            icon_color=C.text_muted,
+            icon_size=18,
+            on_click=lambda e, t=title, b=tip: self._show_info_dialog(t, [b]),
+        )
+
+    async def _open_local_file(self, path: Path, name: str = "", mime: str = ""):
+        """Open a local file with an external app (needed for PDF on Android APK)."""
+        try:
+            from flet.controls.services.share import Share, ShareFile
+
+            await Share().share_files(
+                [ShareFile.from_path(str(path), name=name or path.name)],
+                title=name or path.name,
+                text=name or path.name,
+            )
+            return
+        except Exception:
+            pass
+        try:
+            from flet.controls.services.url_launcher import LaunchMode, UrlLauncher
+
+            await UrlLauncher().launch_url(
+                path.resolve().as_uri(),
+                mode=LaunchMode.EXTERNAL_APPLICATION,
+            )
+        except Exception as exc:
+            self.toast(self._("pdf_open_failed"), error=True)
+            self.toast(str(exc), error=True)
+
+    def _pdf_fallback_panel(self, path: Path, name: str) -> ft.Control:
+        return ft.Column(
+            [
+                ft.Icon(ft.Icons.PICTURE_AS_PDF_OUTLINED, size=48, color=C.primary),
+                muted(self._("pdf_mobile_hint")),
+                primary_button(
+                    self._("open_with_app"),
+                    lambda e, p=path, n=name: self.page.run_task(
+                        self._open_local_file, p, n, "application/pdf"
+                    ),
+                    ft.Icons.OPEN_IN_NEW,
+                    expand=False,
+                ),
+                ghost_button(
+                    self._("download"),
+                    lambda e, p=path, n=name: self._save_cached_copy(p, n),
+                    ft.Icons.DOWNLOAD,
+                ),
+            ],
+            spacing=12,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+
+    def _supports_pdf_webview(self) -> bool:
+        """In-app WebView: Android / iOS / macOS / web. Not Windows/Linux."""
+        if fwv is None:
+            return False
+        try:
+            p = self.page.platform
+            return p in (
+                ft.PagePlatform.ANDROID,
+                ft.PagePlatform.ANDROID_TV,
+                ft.PagePlatform.IOS,
+                ft.PagePlatform.MACOS,
+            ) or bool(self.page.web)
+        except Exception:
+            return False
+
+    def _stop_pdf_server(self):
+        srv = self._pdf_server
+        self._pdf_server = None
+        if srv is None:
+            return
+        try:
+            srv.shutdown()
+        except Exception:
+            pass
+        try:
+            srv.server_close()
+        except Exception:
+            pass
 
     def _configure_page(self):
         self.page.title = "QR Vault"
@@ -432,7 +555,8 @@ class QRVaultApp:
             expand=True,
             spacing=0,
             padding=0,
-            show_default_drag_handles=False,
+            # Mobile: long-press item to drag. Desktop: small overlay handle (no layout width).
+            show_default_drag_handles=True,
             on_reorder=self._on_home_reorder,
         )
         self._home_list = list_view
@@ -535,32 +659,9 @@ class QRVaultApp:
         except Exception:
             pass
 
-    def _drag_handle(self) -> ft.Control:
-        return ft.ReorderableDragHandle(
-            content=ft.Container(
-                content=ft.Icon(ft.Icons.DRAG_INDICATOR, color=C.text_muted, size=22),
-                width=36,
-                height=44,
-                bgcolor=C.surface_alt,
-                border=ft.Border.all(1, C.border),
-                border_radius=10,
-                alignment=ft.Alignment.CENTER,
-            ),
-            tooltip=self._("drag_reorder"),
-        )
-
     def _wrap_list_item(self, content: ft.Control, *, reorder: bool = False) -> ft.Control:
-        """Add bottom gap between items; optional left drag handle (no overlap with actions)."""
-        if reorder:
-            row = ft.Row(
-                [
-                    self._drag_handle(),
-                    ft.Container(content=content, expand=True),
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-            return ft.Container(content=row, margin=ft.Margin.only(bottom=10))
+        """Full-width list row with bottom gap. Reorder via long-press (see ReorderableListView)."""
+        _ = reorder  # kept for call-site compatibility
         return ft.Container(content=content, margin=ft.Margin.only(bottom=10))
 
     def _storage_card(self, s: dict) -> ft.Control:
@@ -613,7 +714,8 @@ class QRVaultApp:
 
         self._home_visible_ids = [s["id"] for s in items if s.get("id")]
         can_reorder = self.home_storage_filter == "all" and len(items) > 1
-        list_view.show_default_drag_handles = False
+        # Long-press to reorder on mobile; disable when filter prevents reordering.
+        list_view.show_default_drag_handles = can_reorder
 
         if not items:
             list_view.controls = [muted("No storages in this filter.")]
@@ -940,11 +1042,7 @@ class QRVaultApp:
                             ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=leave),
                             section_title(self._("scan_title")),
                             ft.Container(expand=True),
-                            ft.IconButton(
-                                icon=ft.Icons.INFO_OUTLINE,
-                                icon_color=C.text_muted,
-                                tooltip=self._("scan_help_tooltip"),
-                            ),
+                            self._info_button("scan_help_tooltip", "scan_title"),
                         ]
                     ),
                     card(
@@ -1462,12 +1560,7 @@ class QRVaultApp:
                             size=13,
                             expand=True,
                         ),
-                        ft.IconButton(
-                            icon=ft.Icons.INFO_OUTLINE,
-                            icon_color=C.text_muted,
-                            icon_size=18,
-                            tooltip=self._("public_vault_tip"),
-                        ),
+                        self._info_button("public_vault_tip", "public_vault"),
                         public_switch,
                     ],
                     spacing=4,
@@ -1830,7 +1923,7 @@ class QRVaultApp:
         list_active = self.browse_mode == "list"
         icons_active = self.browse_mode == "icons"
 
-        def mode_chip(icon, mode: str, active: bool, tooltip: str):
+        def mode_chip(icon, mode: str, active: bool, tip_key: str):
             return ft.Container(
                 content=ft.Icon(icon, size=20, color=C.bg if active else C.text_muted),
                 bgcolor=C.primary if active else C.surface_alt,
@@ -1838,13 +1931,13 @@ class QRVaultApp:
                 border_radius=12,
                 border=ft.Border.all(1, C.primary if active else C.border),
                 on_click=lambda e, m=mode: select(m),
+                on_long_press=lambda e, k=tip_key: self._show_info_dialog(self._(k), [self._(k)]),
                 ink=True,
-                tooltip=tooltip,
             )
 
         view_toggle.controls = [
-            mode_chip(ft.Icons.VIEW_LIST, "list", list_active, self._("list_view")),
-            mode_chip(ft.Icons.GRID_VIEW, "icons", icons_active, self._("icons_view")),
+            mode_chip(ft.Icons.VIEW_LIST, "list", list_active, "list_view"),
+            mode_chip(ft.Icons.GRID_VIEW, "icons", icons_active, "icons_view"),
         ]
         try:
             view_toggle.update()
@@ -2107,7 +2200,8 @@ class QRVaultApp:
                     expand=True,
                     spacing=0,
                     padding=0,
-                    show_default_drag_handles=False,
+                    # Mobile: long-press the full-width item to drag.
+                    show_default_drag_handles=True,
                     on_reorder=lambda e, sid=storage_id: self._on_vault_reorder(e, sid),
                 )
             else:
@@ -2382,8 +2476,9 @@ class QRVaultApp:
         )
         self._preview_panels[fid] = preview
 
-        def toggle(_=None, i=fid, n=name, ct=content_type, panel=preview):
-            self.page.run_task(self._toggle_inline_preview, storage_id, i, n, ct, panel)
+        def open_full(_=None, i=fid, n=name, ct=content_type):
+            # Same full-screen experience as icons browse mode.
+            self.page.run_task(self._open_full_preview, storage_id, i, n, ct)
 
         days = f.get("days_remaining")
         days_txt = f"{days}d left" if days is not None else ""
@@ -2407,7 +2502,7 @@ class QRVaultApp:
             self._show_file_details(title, body)
 
         menu_items = [
-            ft.PopupMenuItem(content=open_label, icon=open_icon, on_click=toggle),
+            ft.PopupMenuItem(content=open_label, icon=open_icon, on_click=open_full),
             ft.PopupMenuItem(
                 content=self._("details"),
                 icon=ft.Icons.INFO_OUTLINE,
@@ -2459,7 +2554,7 @@ class QRVaultApp:
                     icon=ft.Icons.PLAY_ARROW_ROUNDED,
                     icon_color=C.primary,
                     tooltip=self._("play"),
-                    on_click=toggle,
+                    on_click=open_full,
                 )
             )
         trailing.append(
@@ -2475,7 +2570,7 @@ class QRVaultApp:
             ink=True,
             border_radius=14,
             padding=10,
-            on_click=toggle,
+            on_click=open_full,
             content=ft.Row(
                 [
                     leading,
@@ -2498,7 +2593,7 @@ class QRVaultApp:
             bgcolor=C.surface,
             border=ft.Border.all(1, C.border),
             border_radius=14,
-            content=ft.Column([header, preview], spacing=0),
+            content=header,
         )
         return tile, leading
 
@@ -2682,6 +2777,197 @@ class QRVaultApp:
             except Exception:
                 continue
 
+    async def _fetch_pdf_preview_pages(self, storage_id: int, file_id: int) -> list[Path]:
+        """Load PDF page PNGs from local cache or Django preview API (mobile-safe)."""
+        if isinstance(file_id, str):
+            return []
+        cached = self.offline.list_pdf_preview_pages(storage_id, int(file_id))
+        if cached:
+            return cached
+        meta = await asyncio.to_thread(self.api.pdf_preview_meta, storage_id, int(file_id))
+        n = int(meta.get("max_pages") or 0)
+        if n <= 0:
+            return []
+        pages: list[Path] = []
+        for i in range(1, n + 1):
+            dest = self.offline.pdf_preview_page_path(storage_id, int(file_id), i)
+            if not dest.exists() or dest.stat().st_size == 0:
+                await asyncio.to_thread(
+                    self.api.pdf_preview_page, storage_id, int(file_id), i, dest
+                )
+            pages.append(dest)
+        return pages
+
+    def _pdf_open_panel(self, storage_id: int, path: Path, name: str) -> ft.Control:
+        """Compact inline panel — opens the real PDF.js viewer on tap."""
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(ft.Icons.PICTURE_AS_PDF, size=40, color=C.primary),
+                    muted(self._("pdf_tap_to_open")),
+                    primary_button(
+                        self._("pdf_open_viewer"),
+                        lambda e, sid=storage_id, p=path, n=name: self.page.run_task(
+                            self._open_pdf_official, sid, n, p
+                        ),
+                        ft.Icons.OPEN_IN_BROWSER,
+                        expand=False,
+                    ),
+                ],
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            height=200,
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=C.surface,
+            border_radius=12,
+            border=ft.Border.all(1, C.border),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            padding=16,
+        )
+
+    def _pdf_shell(
+        self,
+        storage_id: int,
+        name: str,
+        path: Path,
+        body: ft.Control,
+        *,
+        subtitle: str,
+        viewer_url: str | None = None,
+    ):
+        """Fixed-size chrome around the PDF viewer (container size does not grow)."""
+
+        def _back(_e=None):
+            self._stop_pdf_server()
+            self.page.run_task(self._open_storage, storage_id)
+
+        actions: list[ft.Control] = [
+            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=_back),
+            ft.Column(
+                [
+                    ft.Text(
+                        name,
+                        size=16,
+                        weight=ft.FontWeight.W_700,
+                        color=C.text,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    muted(subtitle),
+                ],
+                spacing=2,
+                expand=True,
+            ),
+        ]
+        if viewer_url:
+            actions.append(
+                ft.IconButton(
+                    ft.Icons.REFRESH,
+                    icon_color=C.text,
+                    tooltip=self._("pdf_reopen"),
+                    on_click=lambda e, u=viewer_url: webbrowser.open(u),
+                )
+            )
+        actions.append(
+            ft.IconButton(
+                ft.Icons.OPEN_IN_NEW,
+                icon_color=C.text,
+                tooltip=self._("open_with_app"),
+                on_click=lambda e, p=path, n=name: self.page.run_task(
+                    self._open_local_file, p, n, "application/pdf"
+                ),
+            )
+        )
+        # Fixed frame: expands to remaining page height; content zooms inside, not the frame.
+        frame = ft.Container(
+            content=body,
+            expand=True,
+            bgcolor="#404040",
+            border_radius=12,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            border=ft.Border.all(1, C.border),
+        )
+        self.set_view(
+            ft.Column(
+                [ft.Row(actions), frame],
+                spacing=8,
+                expand=True,
+            )
+        )
+
+    async def _open_pdf_official(self, storage_id: int, name: str, path: Path) -> bool:
+        """Open Mozilla's official PDF.js viewer (search/zoom/highlight built-in)."""
+        if not can_serve_pdf(path):
+            return False
+        self._stop_pdf_server()
+        try:
+            session = await asyncio.to_thread(
+                prepare_pdf_viewer_dir, path, work_root=PREVIEW_DIR
+            )
+            server, url = await asyncio.to_thread(start_pdf_viewer_server, session)
+        except Exception as exc:
+            self.toast(str(exc), error=True)
+            return False
+        self._pdf_server = server
+
+        if self._supports_pdf_webview():
+            assert fwv is not None
+            wv = fwv.WebView(url=url, expand=True, bgcolor="#404040")
+            self._pdf_shell(
+                storage_id,
+                name,
+                path,
+                wv,
+                subtitle=self._("pdf_official"),
+            )
+            try:
+                await wv.set_javascript_mode(fwv.JavaScriptMode.UNRESTRICTED)
+            except Exception:
+                pass
+            return True
+
+        # Windows/Linux: Flet has no in-app WebView — open official viewer in the browser.
+        try:
+            webbrowser.open(url)
+        except Exception:
+            await self._open_local_file(path, name, "application/pdf")
+            return True
+
+        body = ft.Column(
+            [
+                ft.Icon(ft.Icons.PICTURE_AS_PDF, size=56, color=C.primary),
+                ft.Text(
+                    self._("pdf_opened_external"),
+                    color=C.text,
+                    text_align=ft.TextAlign.CENTER,
+                    size=14,
+                ),
+                muted(self._("pdf_external_hint")),
+                primary_button(
+                    self._("pdf_reopen"),
+                    lambda e, u=url: webbrowser.open(u),
+                    ft.Icons.OPEN_IN_BROWSER,
+                    expand=False,
+                ),
+            ],
+            spacing=14,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        self._pdf_shell(
+            storage_id,
+            name,
+            path,
+            body,
+            subtitle=self._("pdf_official"),
+            viewer_url=url,
+        )
+        return True
+
     async def _open_full_preview(self, storage_id: int, file_id: int, name: str, content_type: str):
         self.toast("Opening…")
         try:
@@ -2692,9 +2978,28 @@ class QRVaultApp:
         except Exception as e:
             self.toast(str(e), error=True)
             return
+
+        if is_pdf(content_type, name):
+            ok = await self._open_pdf_official(storage_id, name, dest)
+            if not ok:
+                await self._open_local_file(dest, name, "application/pdf")
+            return
+
         self.go_full_viewer(storage_id, name, dest, content_type or "")
 
-    def go_full_viewer(self, storage_id: int, name: str, path: Path, content_type: str):
+    def go_full_viewer(
+        self,
+        storage_id: int,
+        name: str,
+        path: Path,
+        content_type: str,
+        pdf_pages: list[Path] | None = None,
+    ):
+        # pdf_pages kept for call-site compatibility; unused — real PDF uses official viewer.
+        _ = pdf_pages
+        if is_pdf(content_type, name):
+            self.page.run_task(self._open_pdf_official, storage_id, name, path)
+            return
         media = self._build_full_media(name, path, content_type)
         frame = ft.Container(
             content=media,
@@ -2713,7 +3018,9 @@ class QRVaultApp:
                             ft.IconButton(
                                 ft.Icons.ARROW_BACK,
                                 icon_color=C.text,
-                                on_click=lambda e: self.page.run_task(self._open_storage, storage_id),
+                                on_click=lambda e: self.page.run_task(
+                                    self._open_storage, storage_id
+                                ),
                             ),
                             ft.Column(
                                 [
@@ -2786,29 +3093,8 @@ class QRVaultApp:
             )
 
         if is_pdf(ct, name):
-            try:
-                pages = render_pdf_pages(path)
-            except ImportError:
-                return muted("PDF page preview is available on desktop only (pypdfium2). Download the file to open it.")
-            except Exception as e:
-                return muted(f"PDF render error: {e}")
-            if not pages:
-                return muted("Could not render PDF pages.")
-            return ft.ListView(
-                expand=True,
-                spacing=10,
-                padding=8,
-                controls=[
-                    ft.Container(
-                        content=ft.Image(src=str(p), fit=ft.BoxFit.CONTAIN, width=380),
-                        bgcolor="#111827",
-                        border_radius=8,
-                        padding=4,
-                        alignment=ft.Alignment.CENTER,
-                    )
-                    for p in pages
-                ],
-            )
+            sid = int((self.current_storage or {}).get("id") or 0)
+            return self._pdf_open_panel(sid, path, name)
 
         if ext in TEXT_PREVIEW_EXTS or ct.startswith("text/"):
             try:
@@ -2901,6 +3187,10 @@ class QRVaultApp:
 
         try:
             dest = await self._cache_file(storage_id, file_id, name)
+            if is_pdf(content_type, name):
+                panel.content = self._pdf_open_panel(storage_id, dest, name)
+                self.page.update()
+                return
             media = self._build_inline_media(name, dest, content_type or "")
             panel.content = media
             self.page.update()
@@ -2983,35 +3273,8 @@ class QRVaultApp:
             )
 
         if is_pdf(ct, name):
-            try:
-                pages = render_pdf_pages(path)
-            except ImportError:
-                return muted("PDF page preview is available on desktop only (pypdfium2). Download the file to open it.")
-            except Exception as e:
-                return muted(f"PDF render error: {e}")
-            if not pages:
-                return muted("Could not render PDF pages.")
-            return ft.Container(
-                content=ft.ListView(
-                    height=280,
-                    spacing=8,
-                    padding=6,
-                    controls=[
-                        ft.Container(
-                            content=ft.Image(src=str(p), fit=ft.BoxFit.CONTAIN, width=340),
-                            bgcolor="#111827",
-                            border_radius=8,
-                            padding=4,
-                            alignment=ft.Alignment.CENTER,
-                        )
-                        for p in pages
-                    ],
-                ),
-                height=290,
-                border_radius=12,
-                border=ft.Border.all(1, C.border),
-                clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            )
+            sid = int((self.current_storage or {}).get("id") or 0)
+            return self._pdf_open_panel(sid, path, name)
 
         if ext in TEXT_PREVIEW_EXTS or ct.startswith("text/"):
             try:
@@ -3350,53 +3613,21 @@ class QRVaultApp:
 
     # ── Archive management ──────────────────────────────────────
     def _show_help(self, _=None):
-        def close(_e=None):
-            self.page.pop_dialog()
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            bgcolor=C.surface,
-            title=ft.Text("How QR Vault works", color=C.text, weight=ft.FontWeight.W_700),
-            content=ft.Container(
-                width=340,
-                content=ft.Column(
-                    [
-                        muted("Scan a QR code to open or create a storage vault."),
-                        muted("Permissions: read (view/download), write (upload/archive/delete), manage (share)."),
-                        muted(
-                            "Sharing sends a request. The other user must Accept on Home "
-                            "before the vault appears under Shared."
-                        ),
-                        muted(
-                            "Drag the handles to reorder vaults on Home, and files/notes "
-                            "inside a storage (All + list view)."
-                        ),
-                        muted(
-                            "Add Note places a rich note in the list with files. "
-                            "Edit bold/colors/sizes; filter with the Notes chip."
-                        ),
-                        muted("Archive hides a file from the main list. Open Archived to restore or permanently delete it."),
-                        muted(
-                            "Retention: every file is permanently deleted 30 days after upload "
-                            "(even if archived). Download anything you need to keep."
-                        ),
-                        muted("Tap a file to preview/play it inline under the row."),
-                        muted(
-                            "Browse modes: List (preview under the row) or Icons (full-screen open)."
-                        ),
-                        muted(
-                            "Merge PDF: combine selected PDFs and/or images into one PDF. "
-                            "Optionally archive the source files after merge."
-                        ),
-                    ],
-                    spacing=10,
-                    scroll=ft.ScrollMode.AUTO,
-                ),
-                height=340,
-            ),
-            actions=[ft.Button(content="Got it", on_click=close, bgcolor=C.primary, color=C.bg)],
+        self._show_info_dialog(
+            self._("help_title"),
+            [
+                self._("help_p1"),
+                self._("help_p2"),
+                self._("help_p3"),
+                self._("help_p4"),
+                self._("help_p5"),
+                self._("help_p6"),
+                self._("help_p7"),
+                self._("help_p8"),
+                self._("help_p9"),
+                self._("help_p10"),
+            ],
         )
-        self.page.show_dialog(dialog)
 
     def go_archive(self):
         s = self.current_storage or {}

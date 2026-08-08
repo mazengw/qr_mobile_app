@@ -511,6 +511,19 @@ class OfflineStore:
         results = data.get("results")
         return results if isinstance(results, list) else None
 
+    def pdf_preview_dir(self, storage_id: int, file_id: int) -> Path:
+        p = self.files_dir / str(storage_id) / "pdf_preview" / str(file_id)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def pdf_preview_page_path(self, storage_id: int, file_id: int, page: int) -> Path:
+        return self.pdf_preview_dir(storage_id, file_id) / f"page_{int(page):03d}.png"
+
+    def list_pdf_preview_pages(self, storage_id: int, file_id: int) -> list[Path]:
+        d = self.pdf_preview_dir(storage_id, file_id)
+        pages = sorted(d.glob("page_*.png"))
+        return [p for p in pages if p.stat().st_size > 0]
+
     def find_storage_by_qr(self, qr_or_id: str) -> dict | None:
         """Resolve a scanned QR / storage id from offline home list or snapshots."""
         code = (qr_or_id or "").strip()
