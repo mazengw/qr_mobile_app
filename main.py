@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 
 import flet as ft
@@ -16,8 +17,19 @@ from app.api import ApiError, VaultAPI
 from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_text_control, wrap_selection
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
+from app.qr_decode import decode_qr_payload
 from app.state import Session
 from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
+
+try:
+    import flet_camera as fc
+except ImportError:  # pragma: no cover - desktop without extension
+    fc = None
+
+try:
+    import flet_permission_handler as fph
+except ImportError:  # pragma: no cover
+    fph = None
 
 
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "qr_vault_preview"
@@ -125,7 +137,12 @@ class QRVaultApp:
         self._storage_files_cache: list[dict] = []
         self._storage_notes_cache: list[dict] = []
         self._vault_visible_items: list[dict] = []
-
+        self._scan_camera = None
+        self._scan_busy = False
+        self._scan_decode_pending = False
+        self._scan_last_decode = 0.0
+        self._scan_status: ft.Text | None = None
+        self._scan_qr_field: ft.TextField | None = None
 
         self.snack = ft.SnackBar(content=ft.Text(""), bgcolor=C.surface_alt)
         self.page.overlay.append(self.snack)
@@ -156,15 +173,23 @@ class QRVaultApp:
         self.page.update()
 
     def set_view(self, body: ft.Control):
+        # SafeArea keeps content below the Android/iOS status bar & above home indicator.
         self.root.content = ft.Container(
-            content=body,
+            content=ft.SafeArea(
+                content=ft.Container(
+                    content=body,
+                    expand=True,
+                    padding=ft.Padding.only(left=18, right=18, top=12, bottom=8),
+                ),
+                expand=True,
+                maintain_bottom_view_padding=True,
+            ),
             expand=True,
             gradient=ft.LinearGradient(
                 begin=ft.Alignment.TOP_LEFT,
                 end=ft.Alignment.BOTTOM_RIGHT,
                 colors=["#0B1220", "#0F172A", "#042F2E"],
             ),
-            padding=ft.Padding.only(left=18, right=18, top=18, bottom=12),
         )
         self.page.update()
 
@@ -250,6 +275,7 @@ class QRVaultApp:
         base_url = ft.TextField(
             label="API base URL",
             value=self.session.base_url,
+            hint_text="http://192.168.x.x:8000  (not 127.0.0.1 on phone)",
             prefix_icon=ft.Icons.CLOUD_OUTLINED,
             border_radius=14,
             bgcolor=C.surface,
@@ -263,7 +289,14 @@ class QRVaultApp:
             if not phone.value or len(phone.value.strip()) < 8:
                 self.toast("Enter a valid phone number", error=True)
                 return
-            self.session.base_url = (base_url.value or self.session.base_url).rstrip("/")
+            url = (base_url.value or self.session.base_url).rstrip("/")
+            if "127.0.0.1" in url or "localhost" in url.lower():
+                self.toast(
+                    "On a real phone use your PC LAN IP, e.g. http://192.168.1.4:8000",
+                    error=True,
+                )
+                # still allow desktop testing with localhost
+            self.session.base_url = url
             self.session.save()
             self.page.run_task(self._request_otp, phone.value.strip(), name.value or "")
 
@@ -274,6 +307,7 @@ class QRVaultApp:
                     ft.Icon(ft.Icons.LOCK_PERSON_OUTLINED, size=48, color=C.primary),
                     section_title("Welcome back"),
                     muted("Sign in with your phone. We'll send a one-time code."),
+                    muted("Phone APK: set API URL to your PC Wi‑Fi IP (Django must listen on 0.0.0.0:8000)."),
                     ft.Container(height=8),
                     card(
                         ft.Column(
@@ -774,7 +808,25 @@ class QRVaultApp:
                 self.page.update()
 
     # ── Scan ────────────────────────────────────────────────────
+    def _camera_platform_ok(self) -> bool:
+        if fc is None:
+            return False
+        try:
+            p = self.page.platform
+            return p in (
+                ft.PagePlatform.ANDROID,
+                ft.PagePlatform.ANDROID_TV,
+                ft.PagePlatform.IOS,
+            ) or bool(self.page.web)
+        except Exception:
+            return False
+
     def go_scan(self):
+        self.page.run_task(self._stop_scan_camera)
+        self._scan_busy = False
+        self._scan_decode_pending = False
+        self._scan_last_decode = 0.0
+
         qr = ft.TextField(
             label="QR code value",
             hint_text='e.g. 1   or   share:<uuid>',
@@ -784,7 +836,32 @@ class QRVaultApp:
             border_color=C.border,
             focused_border_color=C.primary,
             color=C.text,
-            autofocus=True,
+            autofocus=not self._camera_platform_ok(),
+        )
+        self._scan_qr_field = qr
+        status = muted(
+            "Point camera at a vault QR — or paste/type below"
+            if self._camera_platform_ok()
+            else "Camera works on the mobile APK. On desktop, paste/type the QR payload."
+        )
+        self._scan_status = status
+
+        camera_host = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
+                    muted("Preparing camera…"),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            height=280,
+            bgcolor=C.surface_alt,
+            border_radius=16,
+            padding=12,
+            border=ft.Border.all(1, C.border),
+            alignment=ft.Alignment.CENTER,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
 
         def submit(_):
@@ -793,35 +870,38 @@ class QRVaultApp:
                 return
             self.page.run_task(self._scan, qr.value.strip())
 
+        def leave(_):
+            self.page.run_task(self._stop_scan_camera)
+            self.go_home()
+
+        def capture(_):
+            self.page.run_task(self._capture_scan_frame)
+
+        actions = [
+            primary_button("Open storage", submit, ft.Icons.LOCK_OPEN_OUTLINED),
+        ]
+        if self._camera_platform_ok():
+            actions.insert(
+                0,
+                ghost_button("Capture frame", capture, ft.Icons.CAMERA_ALT),
+            )
+
         self.set_view(
             ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=lambda e: self.go_home()),
+                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=leave),
                             section_title("Scan QR"),
                         ]
                     ),
                     card(
                         ft.Column(
                             [
-                                ft.Container(
-                                    content=ft.Column(
-                                        [
-                                            ft.Icon(ft.Icons.QR_CODE_SCANNER, size=72, color=C.primary),
-                                            muted("Point camera later — for now paste/type the QR payload"),
-                                        ],
-                                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                        spacing=8,
-                                    ),
-                                    bgcolor=C.surface_alt,
-                                    border_radius=16,
-                                    padding=24,
-                                    border=ft.Border.all(1, C.border),
-                                    alignment=ft.Alignment.CENTER,
-                                ),
+                                camera_host,
+                                status,
                                 qr,
-                                primary_button("Open storage", submit, ft.Icons.LOCK_OPEN_OUTLINED),
+                                *actions,
                             ],
                             spacing=14,
                         )
@@ -833,6 +913,215 @@ class QRVaultApp:
                 scroll=ft.ScrollMode.AUTO,
             )
         )
+        if self._camera_platform_ok():
+            self.page.run_task(self._start_scan_camera, camera_host)
+        else:
+            camera_host.content = ft.Column(
+                [
+                    ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
+                    muted("Paste or type the QR payload"),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            )
+            try:
+                camera_host.update()
+            except Exception:
+                self.page.update()
+
+    async def _stop_scan_camera(self):
+        cam = self._scan_camera
+        self._scan_camera = None
+        if not cam:
+            return
+        try:
+            await cam.stop_image_stream()
+        except Exception:
+            pass
+        try:
+            await cam.pause_preview()
+        except Exception:
+            pass
+
+    async def _request_camera_permission(self) -> bool:
+        if fph is None:
+            return True
+        try:
+            ph = fph.PermissionHandler()
+            status = await ph.request(fph.Permission.CAMERA)
+            if status in (
+                fph.PermissionStatus.GRANTED,
+                fph.PermissionStatus.LIMITED,
+                fph.PermissionStatus.PROVISIONAL,
+            ):
+                return True
+            if status == fph.PermissionStatus.PERMANENTLY_DENIED:
+                self.toast("Camera permission blocked — enable it in Settings", error=True)
+                try:
+                    await ph.open_app_settings()
+                except Exception:
+                    pass
+                return False
+            self.toast("Camera permission is required to scan", error=True)
+            return False
+        except Exception as exc:
+            # Desktop / unsupported platforms — continue and let camera init fail soft.
+            if "Unsupported" in type(exc).__name__ or "unsupported" in str(exc).lower():
+                return True
+            self.toast(f"Permission error: {exc}", error=True)
+            return False
+
+    def _set_scan_status(self, message: str):
+        if self._scan_status is None:
+            return
+        self._scan_status.value = message
+        try:
+            self._scan_status.update()
+        except Exception:
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    async def _start_scan_camera(self, camera_host: ft.Container):
+        if fc is None:
+            self._set_scan_status("Camera package missing — paste QR value below")
+            return
+        if not await self._request_camera_permission():
+            camera_host.content = ft.Column(
+                [
+                    ft.Icon(ft.Icons.NO_PHOTOGRAPHY, size=56, color=C.warning),
+                    muted("Camera permission denied — paste QR value below"),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            )
+            try:
+                camera_host.update()
+            except Exception:
+                self.page.update()
+            return
+
+        async def on_frame(e):
+            await self._on_scan_frame(getattr(e, "bytes", None))
+
+        camera = fc.Camera(
+            expand=True,
+            preview_enabled=True,
+            on_stream_image=on_frame,
+        )
+        camera_host.content = camera
+        camera_host.padding = 0
+        try:
+            camera_host.update()
+        except Exception:
+            self.page.update()
+
+        try:
+            cameras = await camera.get_available_cameras()
+            if not cameras:
+                raise RuntimeError("No camera found on this device")
+            selected = next(
+                (c for c in cameras if c.lens_direction == fc.CameraLensDirection.BACK),
+                cameras[0],
+            )
+            await camera.initialize(
+                description=selected,
+                resolution_preset=fc.ResolutionPreset.MEDIUM,
+                enable_audio=False,
+                image_format_group=fc.ImageFormatGroup.JPEG,
+            )
+            self._scan_camera = camera
+            streaming = False
+            try:
+                streaming = bool(await camera.supports_image_streaming())
+            except Exception:
+                streaming = False
+            if streaming:
+                await camera.start_image_stream()
+                self._set_scan_status("Point camera at a QR code")
+            else:
+                self._set_scan_status("Tap Capture frame, or paste QR value below")
+                self.page.run_task(self._poll_scan_frames)
+        except Exception as exc:
+            self._scan_camera = None
+            camera_host.content = ft.Column(
+                [
+                    ft.Icon(ft.Icons.NO_PHOTOGRAPHY, size=56, color=C.danger),
+                    muted(f"Camera unavailable: {exc}"),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            )
+            camera_host.padding = 12
+            try:
+                camera_host.update()
+            except Exception:
+                self.page.update()
+            self._set_scan_status("Paste or type the QR payload below")
+
+    async def _poll_scan_frames(self):
+        """Fallback when live image streaming is unavailable."""
+        while self._scan_camera is not None and not self._scan_busy:
+            await asyncio.sleep(0.85)
+            cam = self._scan_camera
+            if cam is None or self._scan_busy:
+                break
+            try:
+                data = await cam.take_picture()
+            except Exception:
+                continue
+            await self._on_scan_frame(data)
+
+    async def _capture_scan_frame(self):
+        cam = self._scan_camera
+        if cam is None:
+            self.toast("Camera not ready", error=True)
+            return
+        try:
+            self._set_scan_status("Capturing…")
+            data = await cam.take_picture()
+            payload = await asyncio.to_thread(decode_qr_payload, data)
+            if not payload:
+                self._set_scan_status("No QR found — try again or paste value")
+                self.toast("No QR found in frame", error=True)
+                return
+            await self._handle_scanned_payload(payload)
+        except Exception as exc:
+            self.toast(str(exc), error=True)
+
+    async def _on_scan_frame(self, image_bytes: bytes | None):
+        if self._scan_busy or self._scan_decode_pending or not image_bytes:
+            return
+        now = time.monotonic()
+        if now - self._scan_last_decode < 0.4:
+            return
+        self._scan_last_decode = now
+        self._scan_decode_pending = True
+        try:
+            payload = await asyncio.to_thread(decode_qr_payload, image_bytes)
+            if payload:
+                await self._handle_scanned_payload(payload)
+        finally:
+            self._scan_decode_pending = False
+
+    async def _handle_scanned_payload(self, payload: str):
+        if self._scan_busy:
+            return
+        self._scan_busy = True
+        try:
+            await self._stop_scan_camera()
+            if self._scan_qr_field is not None:
+                self._scan_qr_field.value = payload
+                try:
+                    self._scan_qr_field.update()
+                except Exception:
+                    pass
+            self._set_scan_status("QR detected — opening…")
+            self.toast(f"Scanned: {payload[:48]}")
+            await self._scan(payload)
+        finally:
+            self._scan_busy = False
 
     async def _scan(self, qr_code: str):
         try:

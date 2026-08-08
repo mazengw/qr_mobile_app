@@ -1,0 +1,20 @@
+[project]
+name = "qr-vault-mobile"
+version = "1.0.0"
+description = "QR Vault mobile client"
+requires-python = ">=3.10"
+
+[tool.flet]
+org = "com.qrvault"
+product = "QR Vault"
+permissions = ["camera"]
+
+[tool.flet.android.permission]
+"android.permission.CAMERA" = true
+
+[tool.flet.android.feature]
+"android.hardware.camera" = false
+"android.hardware.camera.any" = false
+
+[tool.flet.ios.info]
+NSCameraUsageDescription = "QR Vault uses the camera to scan vault QR codes."

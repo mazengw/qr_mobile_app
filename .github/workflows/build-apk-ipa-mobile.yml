@@ -242,6 +242,7 @@ jobs:
     - name: Flet Build APK
       run: |
         flet build apk --yes --verbose --no-rich-output \
+          --permissions camera \
           --build-number=$BUILD_NUMBER \
           --build-version=$BUILD_VERSION
 
@@ -281,6 +282,7 @@ jobs:
       run: |
         flutter config --no-analytics
         flet build ipa --yes --verbose --no-rich-output \
+          --permissions camera \
           --build-number=$BUILD_NUMBER \
           --build-version=$BUILD_VERSION
 
