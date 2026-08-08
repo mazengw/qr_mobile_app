@@ -511,6 +511,21 @@ class OfflineStore:
         results = data.get("results")
         return results if isinstance(results, list) else None
 
+    def find_storage_by_qr(self, qr_or_id: str) -> dict | None:
+        """Resolve a scanned QR / storage id from offline home list or snapshots."""
+        code = (qr_or_id or "").strip()
+        if not code or code.lower().startswith("share:"):
+            return None
+        for s in self.load_home_storages() or []:
+            if str(s.get("qr_code")) == code or str(s.get("id")) == code:
+                return s
+        for path in self.snapshots_dir.glob("*.json"):
+            snap = self._read_json(path, {})
+            st = (snap or {}).get("storage") or {}
+            if str(st.get("qr_code")) == code or str(st.get("id")) == code:
+                return st
+        return None
+
     def upsert_home_storage(self, storage: dict) -> None:
         """Keep home cache in sync when a vault is opened/updated offline-capable."""
         if not storage or not storage.get("id"):

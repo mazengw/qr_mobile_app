@@ -14,6 +14,7 @@ import flet as ft
 import flet_video as ftv
 
 from app.api import ApiError, VaultAPI
+from app.i18n import LANG_AR, LANG_EN, normalize_lang, t
 from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_text_control, wrap_selection
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
@@ -164,7 +165,32 @@ class QRVaultApp:
         self._configure_page()
         self.root = ft.Container(expand=True)
         self.page.add(self.root)
+        self._apply_locale()
         self.go_boot()
+
+    def _(self, key: str, **kwargs) -> str:
+        return t(self.session.lang, key, **kwargs)
+
+    def _apply_locale(self):
+        self.session.lang = normalize_lang(self.session.lang)
+        self.page.rtl = self.session.lang == LANG_AR
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _toggle_language(self, _=None):
+        self.session.lang = LANG_AR if normalize_lang(self.session.lang) != LANG_AR else LANG_EN
+        self.session.save()
+        self._apply_locale()
+        if self.session.is_authenticated:
+            self.go_home()
+        else:
+            self.go_login()
+
+    def _lang_button(self) -> ft.Control:
+        label = self._("lang_switch_to_en") if normalize_lang(self.session.lang) == LANG_AR else self._("lang_switch_to_ar")
+        return ghost_button(label, self._toggle_language, ft.Icons.TRANSLATE)
 
     def _configure_page(self):
         self.page.title = "QR Vault"
@@ -263,7 +289,7 @@ class QRVaultApp:
 
     def go_login(self):
         phone = ft.TextField(
-            label="Phone number",
+            label=self._("phone_number"),
             hint_text="+9715...",
             prefix_icon=ft.Icons.PHONE_IPHONE,
             border_radius=14,
@@ -275,7 +301,7 @@ class QRVaultApp:
             value=self.session.user.get("phone") if self.session.user else "",
         )
         name = ft.TextField(
-            label="Full name (optional)",
+            label=self._("full_name"),
             prefix_icon=ft.Icons.PERSON_OUTLINE,
             border_radius=14,
             bgcolor=C.surface,
@@ -284,7 +310,7 @@ class QRVaultApp:
             color=C.text,
         )
         base_url = ft.TextField(
-            label="API base URL",
+            label=self._("api_base_url"),
             value=self.session.base_url,
             hint_text="http://192.168.x.x:8000  (not 127.0.0.1 on phone)",
             prefix_icon=ft.Icons.CLOUD_OUTLINED,
@@ -298,12 +324,12 @@ class QRVaultApp:
 
         def next_click(_):
             if not phone.value or len(phone.value.strip()) < 8:
-                self.toast("Enter a valid phone number", error=True)
+                self.toast(self._("enter_phone"), error=True)
                 return
             url = (base_url.value or self.session.base_url).rstrip("/")
             if "127.0.0.1" in url or "localhost" in url.lower():
                 self.toast(
-                    "On a real phone use your PC LAN IP, e.g. http://192.168.1.4:8000",
+                    "On a real phone use your PC LAN IP, e.g. http://192.168.1.6:8000",
                     error=True,
                 )
                 # still allow desktop testing with localhost
@@ -314,19 +340,20 @@ class QRVaultApp:
         self.set_view(
             ft.Column(
                 [
-                    ft.Container(height=24),
+                    ft.Row([ft.Container(expand=True), self._lang_button()]),
+                    ft.Container(height=8),
                     ft.Icon(ft.Icons.LOCK_PERSON_OUTLINED, size=48, color=C.primary),
-                    section_title("Welcome back"),
-                    muted("Sign in with your phone. We'll send a one-time code."),
-                    muted("Phone APK: set API URL to your PC Wi‑Fi IP (Django must listen on 0.0.0.0:8000)."),
+                    section_title(self._("welcome_back")),
+                    muted(self._("sign_in_hint")),
+                    muted(self._("phone_apk_hint")),
                     ft.Container(height=8),
                     card(
                         ft.Column(
-                            [phone, name, base_url, primary_button("Sign in", next_click, ft.Icons.LOGIN)],
+                            [phone, name, base_url, primary_button(self._("sign_in"), next_click, ft.Icons.LOGIN)],
                             spacing=14,
                         )
                     ),
-                    muted("Dev OTP is always 123456 when Django DEBUG=True"),
+                    muted(self._("dev_otp_hint")),
                 ],
                 spacing=14,
                 expand=True,
@@ -416,7 +443,7 @@ class QRVaultApp:
             [
                 ft.Column(
                     [
-                        muted("Signed in as"),
+                        muted(self._("signed_in_as")),
                         ft.Text(
                             user.get("first_name") or user.get("phone") or "User",
                             size=22,
@@ -427,15 +454,16 @@ class QRVaultApp:
                     spacing=2,
                     expand=True,
                 ),
-                ghost_button("Sign out", self._logout, ft.Icons.LOGOUT),
+                self._lang_button(),
+                ghost_button(self._("sign_out"), self._logout, ft.Icons.LOGOUT),
             ]
         )
 
         actions = ft.Row(
             [
-                primary_button("Scan QR", lambda e: self.go_scan(), ft.Icons.QR_CODE_SCANNER, expand=True),
-                ghost_button("Refresh", lambda e: self.page.run_task(self._refresh_home, list_view)),
-                ghost_button("Help", lambda e: self._show_help(), ft.Icons.HELP_OUTLINE),
+                primary_button(self._("scan_qr"), lambda e: self.go_scan(), ft.Icons.QR_CODE_SCANNER, expand=True),
+                ghost_button(self._("refresh"), lambda e: self.page.run_task(self._refresh_home, list_view)),
+                ghost_button(self._("help"), lambda e: self._show_help(), ft.Icons.HELP_OUTLINE),
             ],
             spacing=10,
         )
@@ -449,7 +477,7 @@ class QRVaultApp:
             ft.Column(
                 [
                     header,
-                    muted("Your vaults — drag the left handle to reorder"),
+                    muted(self._("your_vaults")),
                     actions,
                     offline_banner,
                     invites,
@@ -498,9 +526,9 @@ class QRVaultApp:
 
         row.visible = True
         row.controls = [
-            chip_btn("All", "all"),
-            chip_btn("Owned", "owned"),
-            chip_btn("Shared", "shared"),
+            chip_btn(self._("filter_all"), "all"),
+            chip_btn(self._("owned_filter"), "owned"),
+            chip_btn(self._("shared_filter"), "shared"),
         ]
         try:
             row.update()
@@ -518,7 +546,7 @@ class QRVaultApp:
                 border_radius=10,
                 alignment=ft.Alignment.CENTER,
             ),
-            tooltip="Drag to reorder",
+            tooltip=self._("drag_reorder"),
         )
 
     def _wrap_list_item(self, content: ft.Control, *, reorder: bool = False) -> ft.Control:
@@ -546,9 +574,9 @@ class QRVaultApp:
             if is_shared
             else ft.Border.all(1, C.border)
         )
-        badges = [chip(source.upper(), color)]
+        badges = [chip(self._("shared") if is_shared else self._("owned"), color)]
         if is_public:
-            badges.insert(0, chip("PUBLIC", C.accent))
+            badges.insert(0, chip(self._("public"), C.accent))
         return ft.Container(
             content=ft.ListTile(
                 leading=ft.Container(
@@ -557,9 +585,9 @@ class QRVaultApp:
                     padding=10,
                     border_radius=12,
                 ),
-                title=ft.Text(s.get("title") or f"Storage {s.get('qr_code')}", color=C.text, weight=ft.FontWeight.W_600),
+                title=ft.Text(s.get("title") or self._("storage_fallback", qr=s.get("qr_code")), color=C.text, weight=ft.FontWeight.W_600),
                 subtitle=ft.Text(
-                    f"QR: {s.get('qr_code')}  ·  {s.get('file_count', 0)} files  ·  {s.get('my_permission')}",
+                    f"QR: {s.get('qr_code')}  ·  {self._('files_count', n=s.get('file_count', 0))}  ·  {self._perm_text(s.get('my_permission'))}",
                     color=C.text_muted,
                     size=12,
                 ),
@@ -804,9 +832,16 @@ class QRVaultApp:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.CLOUD_OFF, color=C.warning, size=18),
-                            muted("Offline — cached vault list. Open a vault to browse saved files/notes."),
+                            ft.Text(
+                                self._("offline_home_banner"),
+                                size=13,
+                                color=C.text_muted,
+                                expand=True,
+                                soft_wrap=True,
+                            ),
                         ],
                         spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
                     ),
                     padding=10,
                 )
@@ -839,8 +874,8 @@ class QRVaultApp:
         self._scan_last_decode = 0.0
 
         qr = ft.TextField(
-            label="QR code value",
-            hint_text='e.g. 1   or   share:<uuid>',
+            label=self._("qr_value"),
+            hint_text=self._("qr_hint"),
             prefix_icon=ft.Icons.QR_CODE_2,
             border_radius=14,
             bgcolor=C.surface,
@@ -851,9 +886,9 @@ class QRVaultApp:
         )
         self._scan_qr_field = qr
         status = muted(
-            "Point camera at a vault QR — or paste/type below"
+            self._("scan_status_ready")
             if self._camera_platform_ok()
-            else "Camera works on the mobile APK. On desktop, paste/type the QR payload."
+            else self._("scan_status_desktop")
         )
         self._scan_status = status
 
@@ -861,7 +896,7 @@ class QRVaultApp:
             content=ft.Column(
                 [
                     ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
-                    muted("Preparing camera…"),
+                    muted(self._("preparing_camera")),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -877,7 +912,7 @@ class QRVaultApp:
 
         def submit(_):
             if not qr.value or not qr.value.strip():
-                self.toast("Enter QR value", error=True)
+                self.toast(self._("enter_qr"), error=True)
                 return
             self.page.run_task(self._scan, qr.value.strip())
 
@@ -889,12 +924,12 @@ class QRVaultApp:
             self.page.run_task(self._capture_scan_frame)
 
         actions = [
-            primary_button("Open storage", submit, ft.Icons.LOCK_OPEN_OUTLINED),
+            primary_button(self._("open_storage"), submit, ft.Icons.LOCK_OPEN_OUTLINED),
         ]
         if self._camera_platform_ok():
             actions.insert(
                 0,
-                ghost_button("Capture frame", capture, ft.Icons.CAMERA_ALT),
+                ghost_button(self._("capture_frame"), capture, ft.Icons.CAMERA_ALT),
             )
 
         self.set_view(
@@ -903,7 +938,13 @@ class QRVaultApp:
                     ft.Row(
                         [
                             ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=leave),
-                            section_title("Scan QR"),
+                            section_title(self._("scan_title")),
+                            ft.Container(expand=True),
+                            ft.IconButton(
+                                icon=ft.Icons.INFO_OUTLINE,
+                                icon_color=C.text_muted,
+                                tooltip=self._("scan_help_tooltip"),
+                            ),
                         ]
                     ),
                     card(
@@ -917,7 +958,6 @@ class QRVaultApp:
                             spacing=14,
                         )
                     ),
-                    muted("Empty storage → you can upload files. Existing storage → browse contents."),
                 ],
                 spacing=14,
                 expand=True,
@@ -930,7 +970,7 @@ class QRVaultApp:
             camera_host.content = ft.Column(
                 [
                     ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
-                    muted("Paste or type the QR payload"),
+                    muted(self._("paste_qr")),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -1128,8 +1168,8 @@ class QRVaultApp:
                     self._scan_qr_field.update()
                 except Exception:
                     pass
-            self._set_scan_status("QR detected — opening…")
-            self.toast(f"Scanned: {payload[:48]}")
+            self._set_scan_status(self._("qr_detected"))
+            self.toast(self._("scanned", value=payload[:48]))
             await self._scan(payload)
         finally:
             self._scan_busy = False
@@ -1155,10 +1195,21 @@ class QRVaultApp:
             if storage.get("id"):
                 await self._open_storage(storage["id"])
         except ApiError as e:
+            # Some transports wrap connection errors; still try offline resolve.
+            offline_hit = self.offline.find_storage_by_qr(qr_code)
+            if offline_hit and offline_hit.get("id"):
+                self.toast(self._("offline_scan_open"))
+                await self._open_storage(int(offline_hit["id"]))
+                return
             self.toast(e.message, error=True)
         except Exception as e:
             if is_network_error(e):
-                self.toast("Offline — cannot scan right now", error=True)
+                offline_hit = self.offline.find_storage_by_qr(qr_code)
+                if offline_hit and offline_hit.get("id"):
+                    self.toast(self._("offline_scan_open"))
+                    await self._open_storage(int(offline_hit["id"]))
+                    return
+                self.toast(self._("offline_scan_miss"), error=True)
             else:
                 self.toast(str(e), error=True)
 
@@ -1185,7 +1236,7 @@ class QRVaultApp:
                 self._offline_mode = True
                 self.file_search = ""
                 self.file_filter = "all"
-                self.toast("Offline — showing cached vault")
+                self.toast(self._("offline_cached_vault"))
                 self.go_storage()
                 return
             self.toast(e.message if isinstance(e, ApiError) else str(e), error=True)
@@ -1193,6 +1244,26 @@ class QRVaultApp:
     # ── Storage detail ──────────────────────────────────────────
     def _perm(self) -> str:
         return (self.current_storage or {}).get("my_permission") or "read"
+
+    def _perm_text(self, perm: str | None = None) -> str:
+        p = (perm or self._perm() or "read").lower()
+        key = {
+            "owner": "perm_owner",
+            "manage": "perm_manage",
+            "write": "perm_write",
+            "read": "perm_read",
+        }.get(p, "perm_read")
+        return self._(key)
+
+    def _perm_badge(self, perm: str | None = None) -> str:
+        p = (perm or self._perm() or "read").lower()
+        key = {
+            "owner": "badge_owner",
+            "manage": "badge_manage",
+            "write": "badge_write",
+            "read": "badge_read",
+        }.get(p)
+        return self._(key) if key else p.upper()
 
     def _can_write(self) -> bool:
         return self._perm() in ("owner", "manage", "write")
@@ -1237,7 +1308,7 @@ class QRVaultApp:
         self._view_toggle = view_toggle
 
         search_field = ft.TextField(
-            hint_text="Search files…",
+            hint_text=self._("search_files"),
             value=self.file_search,
             prefix_icon=ft.Icons.SEARCH,
             border_radius=10,
@@ -1261,7 +1332,7 @@ class QRVaultApp:
         if can_write:
             top_actions.append(
                 primary_button(
-                    "Upload",
+                    self._("upload"),
                     lambda e: self.page.run_task(self._pick_and_upload),
                     ft.Icons.UPLOAD_FILE,
                     expand=False,
@@ -1269,28 +1340,30 @@ class QRVaultApp:
             )
             top_actions.append(
                 ghost_button(
-                    "Add Note",
+                    self._("add_note"),
                     lambda e: self._show_note_editor(sid, note_id=None, note_html="", title=""),
                     ft.Icons.NOTE_ADD_OUTLINED,
                 )
             )
-            top_actions.append(ghost_button("Merge PDF", lambda e: self.go_merge(), ft.Icons.PICTURE_AS_PDF_OUTLINED))
+            top_actions.append(
+                ghost_button(self._("merge_pdf"), lambda e: self.go_merge(), ft.Icons.PICTURE_AS_PDF_OUTLINED)
+            )
         if can_manage:
-            top_actions.append(ghost_button("Share", lambda e: self.go_share()))
+            top_actions.append(ghost_button(self._("share"), lambda e: self.go_share()))
         top_actions.append(
             ghost_button(
-                "Save offline",
+                self._("save_offline"),
                 lambda e, st=sid: self.page.run_task(self._prefetch_offline_files, st),
                 ft.Icons.DOWNLOAD_FOR_OFFLINE_OUTLINED,
             )
         )
-        top_actions.append(ghost_button("Archived", lambda e: self.go_archive(), ft.Icons.ARCHIVE_OUTLINED))
-        top_actions.append(ghost_button("Help", lambda e: self._show_help(), ft.Icons.HELP_OUTLINE))
-        top_actions.append(ghost_button("Sign out", self._logout, ft.Icons.LOGOUT))
+        top_actions.append(ghost_button(self._("archived"), lambda e: self.go_archive(), ft.Icons.ARCHIVE_OUTLINED))
+        top_actions.append(ghost_button(self._("help"), lambda e: self._show_help(), ft.Icons.HELP_OUTLINE))
+        top_actions.append(ghost_button(self._("sign_out"), self._logout, ft.Icons.LOGOUT))
 
         title_controls = [
             ft.Text(
-                s.get("title") or f"Storage {s.get('qr_code')}",
+                s.get("title") or self._("storage_fallback", qr=s.get("qr_code")),
                 size=20,
                 weight=ft.FontWeight.BOLD,
                 color=C.text,
@@ -1301,27 +1374,29 @@ class QRVaultApp:
                 ft.IconButton(
                     icon=ft.Icons.EDIT_OUTLINED,
                     icon_color=C.primary,
-                    tooltip="Rename storage",
+                    tooltip=self._("rename_storage"),
                     icon_size=20,
-                    on_click=lambda e: self._show_rename_dialog(sid, s.get("title") or f"Storage {s.get('qr_code')}"),
+                    on_click=lambda e: self._show_rename_dialog(
+                        sid, s.get("title") or self._("storage_fallback", qr=s.get("qr_code"))
+                    ),
                 )
             )
 
-        perm_label = self._perm()
+        perm_label = self._perm_text()
         is_public = bool(s.get("is_public"))
         pending_n = self.offline.pending_count(sid) if sid else 0
 
         status_chips = []
         if is_public:
-            status_chips.append(chip("PUBLIC", C.accent))
+            status_chips.append(chip(self._("public"), C.accent))
         if self._offline_mode:
-            status_chips.append(chip("OFFLINE", C.warning))
+            status_chips.append(chip(self._("offline"), C.warning))
         elif pending_n:
-            status_chips.append(chip(f"SYNC {pending_n}", C.warning))
+            status_chips.append(chip(self._("sync_badge", n=pending_n), C.warning))
         if not can_write:
-            status_chips.append(chip("READ ONLY", C.warning))
+            status_chips.append(chip(self._("read_only"), C.warning))
         else:
-            status_chips.append(chip(perm_label.upper(), C.owned))
+            status_chips.append(chip(self._perm_badge(), C.owned))
 
         sync_banner = ft.Container(visible=False)
         self._sync_banner = sync_banner
@@ -1338,22 +1413,24 @@ class QRVaultApp:
                         ft.Column(
                             [
                                 ft.Text(
-                                    "Offline mode" if self._offline_mode else f"{pending_n} item(s) waiting to sync",
+                                    self._("offline_mode")
+                                    if self._offline_mode
+                                    else self._("sync_pending", n=pending_n),
                                     color=C.text,
                                     weight=ft.FontWeight.W_700,
                                     size=13,
                                 ),
                                 muted(
-                                    "Showing cached files & notes. New files/notes queue until you're back online."
+                                    self._("offline_mode_body")
                                     if self._offline_mode
-                                    else "Files and notes will upload automatically when the connection returns."
+                                    else self._("sync_queue_body")
                                 ),
                             ],
                             spacing=2,
                             expand=True,
                         ),
                         ghost_button(
-                            "Sync",
+                            self._("sync"),
                             lambda e, st=sid: self.page.run_task(self._manual_sync, st),
                             ft.Icons.SYNC,
                         )
@@ -1378,15 +1455,18 @@ class QRVaultApp:
             public_card = card(
                 ft.Row(
                     [
-                        ft.Text("Public vault", weight=ft.FontWeight.W_700, color=C.text, size=13, expand=True),
+                        ft.Text(
+                            self._("public_vault"),
+                            weight=ft.FontWeight.W_700,
+                            color=C.text,
+                            size=13,
+                            expand=True,
+                        ),
                         ft.IconButton(
                             icon=ft.Icons.INFO_OUTLINE,
                             icon_color=C.text_muted,
                             icon_size=18,
-                            tooltip=(
-                                "Anyone who scans this QR (while signed in) can view files & notes. "
-                                "Only you can edit."
-                            ),
+                            tooltip=self._("public_vault_tip"),
                         ),
                         public_switch,
                     ],
@@ -1403,7 +1483,14 @@ class QRVaultApp:
                     ft.Column(
                         [
                             ft.Row(title_controls, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                            muted(f"QR {s.get('qr_code')} · {perm_label} · owner {s.get('owner_phone')}"),
+                            muted(
+                                self._(
+                                    "storage_meta",
+                                    qr=s.get("qr_code"),
+                                    perm=perm_label,
+                                    phone=s.get("owner_phone") or "",
+                                )
+                            ),
                         ],
                         spacing=2,
                         expand=True,
@@ -1709,7 +1796,12 @@ class QRVaultApp:
 
         select = on_select or default_select
         filter_row.controls.clear()
-        for kind, label in [("all", "All"), ("images", "Images"), ("docs", "Docs"), ("notes", "Notes")]:
+        for kind, label in [
+            ("all", self._("filter_all")),
+            ("images", self._("filter_images")),
+            ("docs", self._("filter_docs")),
+            ("notes", self._("filter_notes")),
+        ]:
             active = self.file_filter == kind
             filter_row.controls.append(
                 ft.Container(
@@ -1751,8 +1843,8 @@ class QRVaultApp:
             )
 
         view_toggle.controls = [
-            mode_chip(ft.Icons.VIEW_LIST, "list", list_active, "List view"),
-            mode_chip(ft.Icons.GRID_VIEW, "icons", icons_active, "Icons view"),
+            mode_chip(ft.Icons.VIEW_LIST, "list", list_active, self._("list_view")),
+            mode_chip(ft.Icons.GRID_VIEW, "icons", icons_active, self._("icons_view")),
         ]
         try:
             view_toggle.update()
@@ -1800,7 +1892,7 @@ class QRVaultApp:
                         ft.Icons.EDIT_OUTLINED,
                         icon_color=C.primary,
                         icon_size=20,
-                        tooltip="Edit",
+                        tooltip=self._("edit"),
                         on_click=lambda e, n=note: self._show_note_editor(
                             storage_id,
                             note_id=n.get("id"),
@@ -1812,7 +1904,7 @@ class QRVaultApp:
                         ft.Icons.DELETE_OUTLINE,
                         icon_color=C.danger,
                         icon_size=20,
-                        tooltip="Delete",
+                        tooltip=self._("delete"),
                         on_click=lambda e, nid=note.get("id"): self.page.run_task(
                             self._delete_note, storage_id, nid
                         ),
@@ -2158,11 +2250,11 @@ class QRVaultApp:
         dialog = ft.AlertDialog(
             modal=True,
             bgcolor=C.surface,
-            title=ft.Text("Rename storage", color=C.text, weight=ft.FontWeight.W_700),
+            title=ft.Text(self._("rename_storage"), color=C.text, weight=ft.FontWeight.W_700),
             content=ft.Container(content=name_field, width=320),
             actions=[
-                ft.Button(content="Cancel", on_click=close),
-                ft.Button(content="Save", on_click=save, bgcolor=C.primary, color=C.bg),
+                ft.Button(content=self._("cancel"), on_click=close),
+                ft.Button(content=self._("save"), on_click=save, bgcolor=C.primary, color=C.bg),
             ],
         )
         self.page.show_dialog(dialog)
@@ -2273,9 +2365,8 @@ class QRVaultApp:
         content_type = f.get("content_type") or ""
         can_write = self._can_write()
         playable = is_playable(content_type, name)
-        image = is_image(content_type, name)
 
-        open_label = "Play" if playable else "Open"
+        open_label = self._("play") if playable else self._("open")
         open_icon = ft.Icons.PLAY_CIRCLE_OUTLINE if playable else ft.Icons.VISIBILITY_OUTLINED
         pending = bool(f.get("pending")) or (
             isinstance(fid, str) and str(fid).startswith("local-file-")
@@ -2294,10 +2385,36 @@ class QRVaultApp:
         def toggle(_=None, i=fid, n=name, ct=content_type, panel=preview):
             self.page.run_task(self._toggle_inline_preview, storage_id, i, n, ct, panel)
 
+        days = f.get("days_remaining")
+        days_txt = f"{days}d left" if days is not None else ""
+        details_lines = [
+            name,
+            f"{fmt_size(f.get('size_original'))} → {fmt_size(f.get('size_compressed'))}",
+        ]
+        if archived:
+            details_lines.append("archived")
+        if days_txt:
+            details_lines.append(days_txt)
+        if pending:
+            details_lines.append(self._("pending"))
+        elif cached:
+            details_lines.append(self._("cached"))
+        elif self._offline_mode:
+            details_lines.append(self._("online_only"))
+        details_text = "\n".join(details_lines)
+
+        def show_details(_=None, title=name, body=details_text):
+            self._show_file_details(title, body)
+
         menu_items = [
             ft.PopupMenuItem(content=open_label, icon=open_icon, on_click=toggle),
             ft.PopupMenuItem(
-                content="Download",
+                content=self._("details"),
+                icon=ft.Icons.INFO_OUTLINE,
+                on_click=show_details,
+            ),
+            ft.PopupMenuItem(
+                content=self._("download"),
                 icon=ft.Icons.DOWNLOAD,
                 on_click=lambda e, i=fid, n=name: self.page.run_task(self._download, storage_id, i, n),
             ),
@@ -2305,7 +2422,7 @@ class QRVaultApp:
         if self._is_owner():
             menu_items.append(
                 ft.PopupMenuItem(
-                    content="Move to…",
+                    content=self._("move_to"),
                     icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINE,
                     on_click=lambda e, i=fid, n=name: self.page.run_task(self._show_move_dialog, storage_id, i, n),
                 )
@@ -2314,14 +2431,14 @@ class QRVaultApp:
             menu_items.extend(
                 [
                     ft.PopupMenuItem(
-                        content="Unarchive" if archived else "Archive",
+                        content=self._("unarchive") if archived else self._("archive"),
                         icon=ft.Icons.ARCHIVE_OUTLINED,
                         on_click=lambda e, i=fid, a=not archived: self.page.run_task(
                             self._archive, storage_id, i, a
                         ),
                     ),
                     ft.PopupMenuItem(
-                        content="Delete",
+                        content=self._("delete"),
                         icon=ft.Icons.DELETE_OUTLINE,
                         on_click=lambda e, i=fid: self.page.run_task(self._delete_file, storage_id, i),
                     ),
@@ -2331,35 +2448,29 @@ class QRVaultApp:
         leading = self._leading_placeholder(content_type)
         trailing: list[ft.Control] = []
         if pending:
-            trailing.append(chip("PENDING", C.warning))
+            trailing.append(chip(self._("pending"), C.warning))
         elif cached:
-            trailing.append(chip("CACHED", C.success))
+            trailing.append(chip(self._("cached"), C.success))
         elif self._offline_mode:
-            trailing.append(chip("ONLINE ONLY", C.warning))
+            trailing.append(chip(self._("online_only"), C.warning))
         if playable:
             trailing.append(
                 ft.IconButton(
                     icon=ft.Icons.PLAY_ARROW_ROUNDED,
                     icon_color=C.primary,
-                    tooltip="Play",
+                    tooltip=self._("play"),
                     on_click=toggle,
                 )
             )
-        else:
-            trailing.append(ft.Icon(ft.Icons.EXPAND_MORE, color=C.text_muted, size=22))
         trailing.append(
             ft.PopupMenuButton(
                 icon=ft.Icons.MORE_VERT,
                 icon_color=C.text_muted,
+                tooltip=self._("details"),
                 items=menu_items,
             )
         )
 
-        days = f.get("days_remaining")
-        days_txt = f" · {days}d left" if days is not None else ""
-        hint = "tap to play below" if playable else (
-            "tap to view below" if image or is_pdf(content_type, name) else "tap to open below"
-        )
         header = ft.Container(
             ink=True,
             border_radius=14,
@@ -2368,24 +2479,13 @@ class QRVaultApp:
             content=ft.Row(
                 [
                     leading,
-                    ft.Column(
-                        [
-                            ft.Text(
-                                name,
-                                color=C.text,
-                                weight=ft.FontWeight.W_600,
-                                size=14,
-                                max_lines=1,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            ),
-                            muted(
-                                f"{fmt_size(f.get('size_original'))} → {fmt_size(f.get('size_compressed'))} compressed"
-                                + (" · archived" if archived else "")
-                                + days_txt
-                                + f" · {hint}"
-                            ),
-                        ],
-                        spacing=2,
+                    ft.Text(
+                        name,
+                        color=C.text,
+                        weight=ft.FontWeight.W_600,
+                        size=14,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
                         expand=True,
                     ),
                     *trailing,
@@ -2401,6 +2501,31 @@ class QRVaultApp:
             content=ft.Column([header, preview], spacing=0),
         )
         return tile, leading
+
+    def _show_file_details(self, title: str, body: str):
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.surface,
+            title=ft.Text(self._("file_details_title"), color=C.text, weight=ft.FontWeight.W_700),
+            content=ft.Container(
+                width=320,
+                content=ft.Column(
+                    [
+                        ft.Text(title, color=C.text, weight=ft.FontWeight.W_600, size=14),
+                        muted(body),
+                    ],
+                    spacing=8,
+                    tight=True,
+                ),
+            ),
+            actions=[
+                ft.Button(content=self._("close"), on_click=close, bgcolor=C.primary, color=C.bg),
+            ],
+        )
+        self.page.show_dialog(dialog)
 
     def _file_icon_tile(self, storage_id: int, f: dict) -> tuple[ft.Control, ft.Container]:
         name = f.get("original_name") or "file"
@@ -2423,14 +2548,34 @@ class QRVaultApp:
         def open_full(_=None, i=fid, n=name, ct=content_type):
             self.page.run_task(self._open_full_preview, storage_id, i, n, ct)
 
+        days = f.get("days_remaining")
+        days_txt = f"{days}d left" if days is not None else ""
+        details_text = "\n".join(
+            x
+            for x in [
+                name,
+                f"{fmt_size(f.get('size_original'))} → {fmt_size(f.get('size_compressed'))}",
+                days_txt,
+            ]
+            if x
+        )
+
+        def show_details(_=None, title=name, body=details_text):
+            self._show_file_details(title, body)
+
         menu_items = [
             ft.PopupMenuItem(
-                content="Open",
+                content=self._("open"),
                 icon=ft.Icons.OPEN_IN_FULL,
                 on_click=open_full,
             ),
             ft.PopupMenuItem(
-                content="Download",
+                content=self._("details"),
+                icon=ft.Icons.INFO_OUTLINE,
+                on_click=show_details,
+            ),
+            ft.PopupMenuItem(
+                content=self._("download"),
                 icon=ft.Icons.DOWNLOAD,
                 on_click=lambda e, i=fid, n=name: self.page.run_task(self._download, storage_id, i, n),
             ),
@@ -2438,7 +2583,7 @@ class QRVaultApp:
         if self._is_owner():
             menu_items.append(
                 ft.PopupMenuItem(
-                    content="Move to…",
+                    content=self._("move_to"),
                     icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINE,
                     on_click=lambda e, i=fid, n=name: self.page.run_task(
                         self._show_move_dialog, storage_id, i, n
@@ -2449,20 +2594,18 @@ class QRVaultApp:
             menu_items.extend(
                 [
                     ft.PopupMenuItem(
-                        content="Archive",
+                        content=self._("archive"),
                         icon=ft.Icons.ARCHIVE_OUTLINED,
                         on_click=lambda e, i=fid: self.page.run_task(self._archive, storage_id, i, True),
                     ),
                     ft.PopupMenuItem(
-                        content="Delete",
+                        content=self._("delete"),
                         icon=ft.Icons.DELETE_OUTLINE,
                         on_click=lambda e, i=fid: self.page.run_task(self._delete_file, storage_id, i),
                     ),
                 ]
             )
 
-        days = f.get("days_remaining")
-        days_txt = f"{days}d left" if days is not None else ""
         tile = ft.Container(
             bgcolor=C.surface,
             border=ft.Border.all(1, C.border),
@@ -2492,6 +2635,7 @@ class QRVaultApp:
                                     icon=ft.Icons.MORE_VERT,
                                     icon_color=C.text,
                                     icon_size=18,
+                                    tooltip=self._("details"),
                                     items=menu_items,
                                 ),
                                 right=0,
@@ -2510,7 +2654,6 @@ class QRVaultApp:
                         overflow=ft.TextOverflow.ELLIPSIS,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    muted(days_txt or "tap to open"),
                 ],
                 spacing=6,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,

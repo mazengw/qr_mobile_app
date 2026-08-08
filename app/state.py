@@ -16,6 +16,7 @@ class Session:
         self.refresh: str | None = None
         self.user: dict[str, Any] | None = None
         self.base_url: str = "http://127.0.0.1:8000"
+        self.lang: str = "en"
         self.load()
 
     @property
@@ -31,6 +32,7 @@ class Session:
             self.refresh = data.get("refresh")
             self.user = data.get("user")
             self.base_url = data.get("base_url") or self.base_url
+            self.lang = data.get("lang") or self.lang
         except Exception:
             pass
 
@@ -43,6 +45,7 @@ class Session:
                     "refresh": self.refresh,
                     "user": self.user,
                     "base_url": self.base_url,
+                    "lang": self.lang,
                 },
                 indent=2,
             ),
