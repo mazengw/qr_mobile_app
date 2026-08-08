@@ -17,5 +17,9 @@ permissions = ["camera"]
 "android.hardware.camera" = false
 "android.hardware.camera.any" = false
 
+# Local PDF.js viewer is served over http://127.0.0.1 — Android blocks cleartext by default.
+[tool.flet.android.manifest_application]
+usesCleartextTraffic = "true"
+
 [tool.flet.ios.info]
 NSCameraUsageDescription = "QR Vault uses the camera to scan vault QR codes."

@@ -2915,7 +2915,20 @@ class QRVaultApp:
 
         if self._supports_pdf_webview():
             assert fwv is not None
-            wv = fwv.WebView(url=url, expand=True, bgcolor="#404040")
+
+            async def _on_webview_error(e):
+                msg = str(getattr(e, "data", e) or "")
+                # Old APKs without usesCleartextTraffic hit this on http://127.0.0.1
+                if "CLEARTEXT" in msg.upper() or "ERR_" in msg.upper():
+                    self.toast(self._("pdf_cleartext_hint"), error=True)
+                    await self._open_local_file(path, name, "application/pdf")
+
+            wv = fwv.WebView(
+                url=url,
+                expand=True,
+                bgcolor="#404040",
+                on_web_resource_error=_on_webview_error,
+            )
             self._pdf_shell(
                 storage_id,
                 name,
@@ -2925,6 +2938,10 @@ class QRVaultApp:
             )
             try:
                 await wv.set_javascript_mode(fwv.JavaScriptMode.UNRESTRICTED)
+            except Exception:
+                pass
+            try:
+                await wv.enable_zoom()
             except Exception:
                 pass
             return True

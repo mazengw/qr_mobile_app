@@ -191,6 +191,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ar": "استخدم شريط أدوات المتصفح للبحث والتكبير والتنقل. أبقِ التطبيق مفتوحاً.",
     },
     "pdf_reopen": {"en": "Reopen viewer", "ar": "إعادة فتح العارض"},
+    "pdf_cleartext_hint": {
+        "en": "In-app PDF needs a rebuilt APK (cleartext). Opening with another app…",
+        "ar": "عارض PDF داخل التطبيق يحتاج إعادة بناء APK. جاري الفتح بتطبيق آخر…",
+    },
     "pdf_open_failed": {
         "en": "Could not open PDF. Try Download from the menu.",
         "ar": "تعذّر فتح ملف PDF. جرّب التنزيل من القائمة.",
