@@ -65,7 +65,18 @@ def is_pdf(content_type: str, name: str = "") -> bool:
 
 
 def render_pdf_pages(pdf_path: Path, max_pages: int = 40) -> list[Path]:
-    import pypdfium2 as pdfium
+    """Render PDF pages to PNGs when pypdfium2 is available (desktop).
+
+    APK builds cannot ship pypdfium2 — it has no Android wheel on pypi.flet.dev
+    and Flet installs mobile deps with --only-binary. Callers must handle ImportError.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:
+        raise ImportError(
+            "PDF preview needs pypdfium2 (desktop only). "
+            "Install: pip install -r requirements-desktop.txt"
+        ) from exc
 
     out_dir = PREVIEW_DIR / f"pdf_{pdf_path.stem}_{pdf_path.stat().st_size}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1229,13 +1240,17 @@ class QRVaultApp:
             hint_text="Search files…",
             value=self.file_search,
             prefix_icon=ft.Icons.SEARCH,
-            border_radius=14,
+            border_radius=10,
             bgcolor=C.surface,
             border_color=C.border,
             focused_border_color=C.primary,
             color=C.text,
             cursor_color=C.primary,
-            text_size=14,
+            text_size=13,
+            dense=True,
+            filled=True,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            expand=True,
             on_change=on_search_change,
         )
 
@@ -1363,23 +1378,22 @@ class QRVaultApp:
             public_card = card(
                 ft.Row(
                     [
-                        ft.Column(
-                            [
-                                ft.Text("Public vault", weight=ft.FontWeight.W_700, color=C.text, size=13),
-                                muted(
-                                    "Anyone who scans this QR (while signed in) can view files & notes. "
-                                    "Only you can edit."
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
+                        ft.Text("Public vault", weight=ft.FontWeight.W_700, color=C.text, size=13, expand=True),
+                        ft.IconButton(
+                            icon=ft.Icons.INFO_OUTLINE,
+                            icon_color=C.text_muted,
+                            icon_size=18,
+                            tooltip=(
+                                "Anyone who scans this QR (while signed in) can view files & notes. "
+                                "Only you can edit."
+                            ),
                         ),
                         public_switch,
                     ],
-                    spacing=10,
+                    spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                padding=12,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             )
 
         body_controls = [
@@ -1399,19 +1413,6 @@ class QRVaultApp:
             ),
             sync_banner,
             public_card,
-            card(
-                ft.Column(
-                    [
-                        ft.Text("Retention policy", weight=ft.FontWeight.W_700, color=C.text, size=13),
-                        muted(
-                            "Files are permanently deleted 30 days after upload. "
-                            "Archive hides a file from this list — restore or delete it from Archived."
-                        ),
-                    ],
-                    spacing=4,
-                ),
-                padding=12,
-            ),
             ft.Row(top_actions, spacing=10, scroll=ft.ScrollMode.AUTO) if top_actions else ft.Container(),
             ft.Row(
                 [
@@ -1420,15 +1421,16 @@ class QRVaultApp:
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
+            ft.Row([search_field], expand=False),
             ft.Column(
-                [search_field, files_host],
+                [files_host],
                 spacing=6,
                 expand=True,
                 tight=True,
             ),
         ]
 
-        self.set_view(ft.Column(body_controls, spacing=12, expand=True, tight=True))
+        self.set_view(ft.Column(body_controls, spacing=10, expand=True, tight=True))
         self._rebuild_filter_chips(filter_row, sid, on_select=set_filter)
         self._rebuild_view_toggle(view_toggle, sid, on_select=set_mode)
         self.page.run_task(self._load_files, sid)
@@ -2643,6 +2645,8 @@ class QRVaultApp:
         if is_pdf(ct, name):
             try:
                 pages = render_pdf_pages(path)
+            except ImportError:
+                return muted("PDF page preview is available on desktop only (pypdfium2). Download the file to open it.")
             except Exception as e:
                 return muted(f"PDF render error: {e}")
             if not pages:
@@ -2838,6 +2842,8 @@ class QRVaultApp:
         if is_pdf(ct, name):
             try:
                 pages = render_pdf_pages(path)
+            except ImportError:
+                return muted("PDF page preview is available on desktop only (pypdfium2). Download the file to open it.")
             except Exception as e:
                 return muted(f"PDF render error: {e}")
             if not pages:

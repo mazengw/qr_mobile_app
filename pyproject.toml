@@ -2,7 +2,8 @@
 name = "qr-vault-mobile"
 version = "1.0.0"
 description = "QR Vault mobile client"
-requires-python = ">=3.10"
+# Pin below 3.14 so `flet build` resolves to Python 3.13 (more mobile wheels).
+requires-python = ">=3.12,<3.14"
 
 [tool.flet]
 org = "com.qrvault"

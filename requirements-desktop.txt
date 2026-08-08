@@ -1,0 +1,3 @@
+# Desktop / Windows / Linux / macOS only (not used by `flet build apk`).
+-r requirements.txt
+pypdfium2>=4.30.0

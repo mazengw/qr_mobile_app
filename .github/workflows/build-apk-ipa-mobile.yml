@@ -243,6 +243,7 @@ jobs:
       run: |
         flet build apk --yes --verbose --no-rich-output \
           --permissions camera \
+          --python-version 3.13 \
           --build-number=$BUILD_NUMBER \
           --build-version=$BUILD_VERSION
 
@@ -283,6 +284,7 @@ jobs:
         flutter config --no-analytics
         flet build ipa --yes --verbose --no-rich-output \
           --permissions camera \
+          --python-version 3.13 \
           --build-number=$BUILD_NUMBER \
           --build-version=$BUILD_VERSION
 

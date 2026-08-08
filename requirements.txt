@@ -3,7 +3,8 @@ flet-video>=0.86.0
 flet-camera>=0.86.0
 flet-permission-handler>=0.86.0
 httpx>=0.27.0
-#pypdfium2>=4.30.0
 Pillow>=10.0.0
 # On Android/iOS APK builds, Flet installs the mobile wheel from https://pypi.flet.dev
 pyzbar>=0.1.9
+# pypdfium2 is NOT listed here: no Android/iOS wheel on pypi.flet.dev, so
+# `flet build apk` fails with --only-binary. Use requirements-desktop.txt on PC.
