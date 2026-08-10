@@ -164,9 +164,11 @@ class QRVaultApp:
         self._scan_status: ft.Text | None = None
         self._scan_qr_field: ft.TextField | None = None
         self._pdf_server = None  # local HTTP server for official PDF.js viewer
-
-        self.snack = ft.SnackBar(content=ft.Text(""), bgcolor=C.surface_alt)
-        self.page.overlay.append(self.snack)
+        self._pending_register_avatar: Path | None = None
+        self._auth_error_text: ft.Text | None = None
+        self._auth_error_banner_box: ft.Container | None = None
+        self._back_handler = None  # callable for system / gesture back
+        self._drawer_open = False
 
         # FilePicker is a Service in Flet >=0.80 — do not add to page.overlay
         self.file_picker = ft.FilePicker()
@@ -200,6 +202,95 @@ class QRVaultApp:
     def _lang_button(self) -> ft.Control:
         label = self._("lang_switch_to_en") if normalize_lang(self.session.lang) == LANG_AR else self._("lang_switch_to_ar")
         return ghost_button(label, self._toggle_language, ft.Icons.TRANSLATE)
+
+    def _auth_error_message(self, exc: BaseException) -> str:
+        """Map auth/network failures to clear localized user messages."""
+        if isinstance(exc, ApiError):
+            code = (exc.code or "").upper()
+            code_map = {
+                "INVALID_PHONE": "enter_phone",
+                "PHONE_EXISTS": "phone_exists",
+                "DISPLAY_NAME_REQUIRED": "enter_display_name",
+                "PASSWORD_TOO_SHORT": "password_too_short",
+                "PASSWORD_MISMATCH": "passwords_mismatch",
+                "PASSWORD_REQUIRED": "enter_password",
+                "INVALID_CREDENTIALS": "invalid_credentials",
+                "ACCOUNT_DISABLED": "account_disabled",
+                "INVALID_OTP": "invalid_otp",
+            }
+            if code in code_map:
+                return self._(code_map[code])
+            raw = (exc.message or "").lower()
+            if "already exists" in raw or "phone_exists" in raw:
+                return self._("phone_exists")
+            if "invalid_credentials" in raw or "wrong phone" in raw or "invalid phone or password" in raw:
+                return self._("invalid_credentials")
+            if "password" in raw and ("match" in raw or "mismatch" in raw):
+                return self._("passwords_mismatch")
+            if "at least 4" in raw or "too short" in raw or "password_too_short" in raw:
+                return self._("password_too_short")
+            if "display" in raw and "name" in raw:
+                return self._("enter_display_name")
+            if "disabled" in raw:
+                return self._("account_disabled")
+            if "invalid phone" in raw:
+                return self._("enter_phone")
+            if exc.status_code and exc.status_code >= 500:
+                return self._("auth_server_error")
+            if exc.message:
+                return exc.message
+            return self._("auth_generic_error")
+
+        if is_network_error(exc):
+            msg = str(exc).lower()
+            if "timeout" in msg or "timed out" in msg:
+                return self._("auth_timeout")
+            return self._("auth_network_error")
+        return self._("auth_generic_error")
+
+    def _toast_auth_error(self, exc: BaseException):
+        # Auth screens: show only the top inline banner (no bottom SnackBar).
+        self.toast(self._auth_error_message(exc), error=True, snack=False)
+
+    def _auth_error_banner(self) -> ft.Control:
+        """Persistent inline error line on auth forms (SnackBar alone is easy to miss)."""
+        text = ft.Text("", color="#FECDD3", size=13, weight=ft.FontWeight.W_600)
+        self._auth_error_text = text
+        banner = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=C.danger, size=18),
+                    text,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            visible=False,
+            bgcolor="#4C0519",
+            border=ft.Border.all(1, C.danger),
+            border_radius=12,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+        self._auth_error_banner_box = banner
+        return banner
+
+    def _set_auth_form_error(self, message: str | None):
+        banner = getattr(self, "_auth_error_banner_box", None)
+        text = self._auth_error_text
+        msg = (message or "").strip()
+        if text is not None:
+            text.value = msg
+        if isinstance(banner, ft.Container):
+            banner.visible = bool(msg)
+            try:
+                banner.update()
+                return
+            except Exception:
+                pass
+        try:
+            self.page.update()
+        except Exception:
+            pass
 
     def _show_info_dialog(self, title: str, paragraphs: list[str]):
         """Mobile-friendly info panel (replaces unreliable tooltips)."""
@@ -325,12 +416,96 @@ class QRVaultApp:
         self.page.window.height = 860
         self.page.window.min_width = 360
         self.page.window.min_height = 700
+        # Android system back / iOS pop: close dialogs first, then screen stack.
+        try:
+            root = self.page.views[0]
+            root.can_pop = False
+            root.on_confirm_pop = self._on_confirm_pop
+        except Exception:
+            pass
+        self.page.on_keyboard_event = self._on_keyboard_event
 
-    def toast(self, message: str, error: bool = False):
-        self.snack.content = ft.Text(message, color=C.text)
-        self.snack.bgcolor = C.danger if error else C.surface_alt
-        self.snack.open = True
-        self.page.update()
+    def _set_back(self, handler=None):
+        """Register what system/gesture back should do on this screen (None = app root)."""
+        self._back_handler = handler
+
+    def _request_back(self, _e=None):
+        self.page.run_task(self._navigate_back)
+
+    def _on_keyboard_event(self, e: ft.KeyboardEvent):
+        if (e.key or "").lower() in ("escape", "esc"):
+            self.page.run_task(self._navigate_back)
+
+    async def _on_confirm_pop(self, e):
+        handled = await self._navigate_back()
+        try:
+            # If nothing to go back to, allow leaving the app.
+            await e.control.confirm_pop(not handled)
+        except Exception:
+            pass
+
+    def _top_open_dialog(self):
+        try:
+            dialogs = getattr(self.page, "_dialogs", None)
+            controls = getattr(dialogs, "controls", None) or []
+            for dlg in reversed(controls):
+                if getattr(dlg, "open", False):
+                    return dlg
+        except Exception:
+            pass
+        return None
+
+    async def _navigate_back(self) -> bool:
+        """Dismiss overlay or go to previous screen. True if something was handled."""
+        dialog = self._top_open_dialog()
+        if dialog is not None:
+            # Prefer closing real dialogs; snackbars count too (top of stack).
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+            return True
+
+        if self._drawer_open:
+            self._drawer_open = False
+            try:
+                await self.page.close_drawer()
+            except Exception:
+                pass
+            return True
+
+        handler = self._back_handler
+        if handler is None:
+            return False
+        try:
+            result = handler()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            self.toast(str(exc), error=True)
+        return True
+
+    def toast(self, message: str, error: bool = False, *, snack: bool = True):
+        msg = (message or "").strip() or self._("auth_generic_error")
+        if error:
+            self._set_auth_form_error(msg)
+        if not snack:
+            return
+        # Flet 0.86+: SnackBar is a dialog — overlay.open no longer shows reliably.
+        bar = ft.SnackBar(
+            content=ft.Text(msg, color=C.text, size=13),
+            bgcolor=C.danger if error else C.surface_alt,
+            show_close_icon=True,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            duration=ft.Duration(milliseconds=5000),
+        )
+        try:
+            self.page.show_dialog(bar)
+        except Exception:
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
     def set_view(self, body: ft.Control):
         # SafeArea keeps content below the Android/iOS status bar & above home indicator.
@@ -355,6 +530,7 @@ class QRVaultApp:
 
     # ── Boot / Auth ─────────────────────────────────────────────
     def go_boot(self):
+        self._set_back(None)
         self.set_view(
             ft.Column(
                 [
@@ -411,6 +587,7 @@ class QRVaultApp:
             self.toast(f"Could not sync {failed} item(s)", error=True)
 
     def go_login(self):
+        self._set_back(None)
         phone = ft.TextField(
             label=self._("phone_number"),
             hint_text="+9715...",
@@ -421,11 +598,13 @@ class QRVaultApp:
             focused_border_color=C.primary,
             color=C.text,
             cursor_color=C.primary,
-            value=self.session.user.get("phone") if self.session.user else "",
+            value=(self.session.user or {}).get("phone") or "",
         )
-        name = ft.TextField(
-            label=self._("full_name"),
-            prefix_icon=ft.Icons.PERSON_OUTLINE,
+        password = ft.TextField(
+            label=self._("password"),
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_OUTLINE,
             border_radius=14,
             bgcolor=C.surface,
             border_color=C.border,
@@ -445,38 +624,71 @@ class QRVaultApp:
             text_size=13,
         )
 
-        def next_click(_):
-            if not phone.value or len(phone.value.strip()) < 8:
-                self.toast(self._("enter_phone"), error=True)
-                return
+        def save_base():
             url = (base_url.value or self.session.base_url).rstrip("/")
-            if "127.0.0.1" in url or "localhost" in url.lower():
-                self.toast(
-                    "On a real phone use your PC LAN IP, e.g. http://192.168.1.6:8000",
-                    error=True,
-                )
-                # still allow desktop testing with localhost
+            if not url:
+                self.toast(self._("enter_api_url"), error=True, snack=False)
+                return False
+            # 127.0.0.1 is fine on desktop; phone_apk_hint already explains LAN IP for APK.
             self.session.base_url = url
             self.session.save()
-            self.page.run_task(self._request_otp, phone.value.strip(), name.value or "")
+            return True
 
+        def sign_in(_):
+            self._set_auth_form_error(None)
+            if not phone.value or len(phone.value.strip()) < 8:
+                self.toast(self._("enter_phone"), error=True, snack=False)
+                return
+            if not (password.value or "").strip():
+                self.toast(self._("enter_password"), error=True, snack=False)
+                return
+            if len((password.value or "").strip()) < 4:
+                self.toast(self._("password_too_short"), error=True, snack=False)
+                return
+            if not save_base():
+                return
+            self.page.run_task(self._login, phone.value.strip(), password.value)
+
+        error_banner = self._auth_error_banner()
         self.set_view(
             ft.Column(
                 [
                     ft.Row([ft.Container(expand=True), self._lang_button()]),
                     ft.Container(height=8),
-                    ft.Icon(ft.Icons.LOCK_PERSON_OUTLINED, size=48, color=C.primary),
-                    section_title(self._("welcome_back")),
-                    muted(self._("sign_in_hint")),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.LOCK_PERSON_OUTLINED, size=44, color=C.primary),
+                            ft.Column(
+                                [
+                                    section_title(self._("welcome_back")),
+                                    muted(self._("sign_in_hint")),
+                                ],
+                                spacing=4,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=14,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                     muted(self._("phone_apk_hint")),
-                    ft.Container(height=8),
+                    error_banner,
+                    ft.Container(height=4),
                     card(
                         ft.Column(
-                            [phone, name, base_url, primary_button(self._("sign_in"), next_click, ft.Icons.LOGIN)],
+                            [
+                                phone,
+                                password,
+                                base_url,
+                                primary_button(self._("sign_in"), sign_in, ft.Icons.LOGIN),
+                                ghost_button(
+                                    self._("no_account"),
+                                    lambda e: self.go_register(),
+                                    ft.Icons.PERSON_ADD_ALT_1,
+                                ),
+                            ],
                             spacing=14,
                         )
                     ),
-                    muted(self._("dev_otp_hint")),
                 ],
                 spacing=14,
                 expand=True,
@@ -484,73 +696,505 @@ class QRVaultApp:
             )
         )
 
-    async def _request_otp(self, phone: str, full_name: str):
-        try:
-            data = await asyncio.to_thread(self.api.request_otp, phone)
-            hint = data.get("dev_otp")
-            self.go_otp(phone, full_name, hint)
-        except ApiError as e:
-            self.toast(e.message, error=True)
-        except Exception as e:
-            self.toast(f"Login error: {e}", error=True)
-
-    def go_otp(self, phone: str, full_name: str, hint: str | None):
-        code = ft.TextField(
-            label="OTP code",
-            hint_text="123456",
-            password=True,
-            can_reveal_password=True,
-            max_length=8,
-            text_align=ft.TextAlign.CENTER,
-            text_size=22,
+    def go_register(self):
+        self._set_back(self.go_login)
+        self._pending_register_avatar = None
+        phone = ft.TextField(
+            label=self._("phone_number"),
+            hint_text="+9715...",
+            prefix_icon=ft.Icons.PHONE_IPHONE,
             border_radius=14,
             bgcolor=C.surface,
             border_color=C.border,
             focused_border_color=C.primary,
             color=C.text,
-            value=hint or "",
+        )
+        display_name = ft.TextField(
+            label=self._("display_name"),
+            prefix_icon=ft.Icons.BADGE_OUTLINED,
+            border_radius=14,
+            bgcolor=C.surface,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+        )
+        password = ft.TextField(
+            label=self._("password"),
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_OUTLINE,
+            border_radius=14,
+            bgcolor=C.surface,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+        )
+        password2 = ft.TextField(
+            label=self._("password_confirm"),
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_OUTLINE,
+            border_radius=14,
+            bgcolor=C.surface,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+        )
+        base_url = ft.TextField(
+            label=self._("api_base_url"),
+            value=self.session.base_url,
+            hint_text="http://192.168.x.x:8000",
+            prefix_icon=ft.Icons.CLOUD_OUTLINED,
+            border_radius=14,
+            bgcolor=C.surface,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+            text_size=13,
         )
 
-        def verify(_):
-            if not code.value:
-                self.toast("Enter OTP", error=True)
-                return
-            self.page.run_task(self._verify_otp, phone, code.value.strip(), full_name)
+        avatar_box = ft.Container(
+            content=ft.Icon(ft.Icons.ADD_A_PHOTO_OUTLINED, size=30, color=C.primary),
+            width=72,
+            height=72,
+            bgcolor=C.surface_alt,
+            border=ft.Border.all(2, C.primary),
+            border_radius=36,
+            alignment=ft.Alignment.CENTER,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            ink=True,
+            tooltip=self._("add_photo"),
+        )
 
+        async def pick_register_photo(_e=None):
+            files = await self.file_picker.pick_files(
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["jpg", "jpeg", "png", "webp", "gif"],
+            )
+            if not files:
+                return
+            path = Path(files[0].path)
+            self._pending_register_avatar = path
+            avatar_box.content = ft.Image(
+                src=str(path),
+                width=72,
+                height=72,
+                fit=ft.BoxFit.COVER,
+                border_radius=36,
+            )
+            try:
+                avatar_box.update()
+            except Exception:
+                self.page.update()
+            self.toast(self._("photo_selected"))
+
+        avatar_box.on_click = lambda e: self.page.run_task(pick_register_photo)
+
+        def create(_):
+            self._set_auth_form_error(None)
+            if not phone.value or len(phone.value.strip()) < 8:
+                self.toast(self._("enter_phone"), error=True, snack=False)
+                return
+            name = (display_name.value or "").strip()
+            if len(name) < 2:
+                self.toast(self._("enter_display_name"), error=True, snack=False)
+                return
+            if not (password.value or "").strip():
+                self.toast(self._("enter_password"), error=True, snack=False)
+                return
+            if len((password.value or "").strip()) < 4:
+                self.toast(self._("password_too_short"), error=True, snack=False)
+                return
+            if (password.value or "") != (password2.value or ""):
+                self.toast(self._("passwords_mismatch"), error=True, snack=False)
+                return
+            url = (base_url.value or self.session.base_url).rstrip("/")
+            if not url:
+                self.toast(self._("enter_api_url"), error=True, snack=False)
+                return
+            self.session.base_url = url
+            self.session.save()
+            self.page.run_task(
+                self._register,
+                phone.value.strip(),
+                password.value,
+                password2.value,
+                name,
+            )
+
+        error_banner = self._auth_error_banner()
         self.set_view(
             ft.Column(
                 [
-                    ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=lambda e: self.go_login()),
-                    section_title("Verify phone"),
-                    muted(f"Code sent to {phone}"),
+                    ft.Row(
+                        [
+                            ft.IconButton(
+                                ft.Icons.ARROW_BACK,
+                                icon_color=C.text,
+                                on_click=self._request_back,
+                            ),
+                            ft.Container(expand=True),
+                            self._lang_button(),
+                        ]
+                    ),
+                    ft.Row(
+                        [
+                            avatar_box,
+                            ft.Column(
+                                [
+                                    section_title(self._("create_account_title")),
+                                    muted(self._("create_account_hint")),
+                                    muted(self._("tap_to_add_photo"), size=12),
+                                ],
+                                spacing=4,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=14,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    error_banner,
                     card(
                         ft.Column(
                             [
-                                code,
-                                primary_button("Verify & enter vault", verify, ft.Icons.VERIFIED_USER_OUTLINED),
-                                ghost_button("Resend code", lambda e: self.page.run_task(self._request_otp, phone, full_name)),
+                                phone,
+                                display_name,
+                                password,
+                                password2,
+                                base_url,
+                                primary_button(self._("sign_up"), create, ft.Icons.PERSON_ADD),
+                                ghost_button(
+                                    self._("have_account"),
+                                    lambda e: self.go_login(),
+                                    ft.Icons.LOGIN,
+                                ),
                             ],
                             spacing=14,
                         )
                     ),
-                    muted(f"Dev hint: {hint}" if hint else "Check SMS / server logs for OTP"),
                 ],
                 spacing=14,
                 expand=True,
+                scroll=ft.ScrollMode.AUTO,
             )
         )
 
-    async def _verify_otp(self, phone: str, code: str, full_name: str):
+    async def _login(self, phone: str, password: str):
         try:
-            await asyncio.to_thread(self.api.verify_otp, phone, code, full_name)
-            self.toast("Signed in successfully")
+            await asyncio.to_thread(self.api.login, phone, password)
+            self._set_auth_form_error(None)
+            self.toast(self._("signed_in_ok"))
+            self.go_home()
+        except Exception as e:
+            self._toast_auth_error(e)
+
+    async def _register(self, phone: str, password: str, password_confirm: str, display_name: str):
+        try:
+            await asyncio.to_thread(
+                self.api.register, phone, password, password_confirm, display_name
+            )
+            avatar_path = self._pending_register_avatar
+            self._pending_register_avatar = None
+            if avatar_path and avatar_path.is_file():
+                try:
+                    await asyncio.to_thread(self.api.upload_avatar, avatar_path)
+                except Exception:
+                    # Account exists; photo can still be set later from the profile drawer.
+                    pass
+            self._set_auth_form_error(None)
+            self.toast(self._("account_created"))
+            self.go_home()
+        except ApiError as e:
+            msg = self._auth_error_message(e)
+            if (e.code or "") == "PHONE_EXISTS" or "PHONE_EXISTS" in (e.message or ""):
+                self.go_login()
+                self.toast(msg, error=True, snack=False)
+            else:
+                self.toast(msg, error=True, snack=False)
+        except Exception as e:
+            self._toast_auth_error(e)
+
+    def _user_display_name(self) -> str:
+        user = self.session.user or {}
+        return (
+            (user.get("display_name") or user.get("first_name") or "").strip()
+            or user.get("phone")
+            or "User"
+        )
+
+    def _avatar_image(self, *, size: float = 48, radius: float | None = None) -> ft.Control:
+        r = size / 2 if radius is None else radius
+        url = (self.session.user or {}).get("avatar_url")
+        if url:
+            inner: ft.Control = ft.Image(
+                src=str(url),
+                width=size,
+                height=size,
+                fit=ft.BoxFit.COVER,
+                border_radius=r,
+            )
+        else:
+            inner = ft.Icon(ft.Icons.PERSON, size=size * 0.55, color=C.primary)
+        return ft.Container(
+            content=inner,
+            width=size,
+            height=size,
+            bgcolor=C.surface_alt,
+            border=ft.Border.all(2, C.primary),
+            border_radius=r,
+            alignment=ft.Alignment.CENTER,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+    def _drawer_profile_avatar(self) -> ft.Control:
+        """Avatar with camera badge — tap opens viewer + edit actions."""
+        size = 96.0
+        badge = ft.Container(
+            content=ft.Icon(ft.Icons.CAMERA_ALT, size=14, color="#FFFFFF"),
+            width=30,
+            height=30,
+            bgcolor=C.primary,
+            border_radius=15,
+            alignment=ft.Alignment.CENTER,
+            border=ft.Border.all(2, C.surface),
+        )
+        return ft.Container(
+            content=ft.Stack(
+                [
+                    self._avatar_image(size=size),
+                    ft.Container(content=badge, right=0, bottom=0),
+                ],
+                width=size,
+                height=size,
+            ),
+            ink=True,
+            border_radius=size / 2,
+            tooltip=self._("profile_photo"),
+            on_click=lambda e: self.page.run_task(self._open_avatar_viewer),
+        )
+
+    def _build_profile_drawer(self) -> ft.NavigationDrawer:
+        user = self.session.user or {}
+        phone = user.get("phone") or ""
+
+        def tile(icon, label, on_click):
+            return ft.Container(
+                content=ft.ListTile(
+                    leading=ft.Icon(icon, color=C.primary),
+                    title=ft.Text(label, color=C.text, size=14),
+                    on_click=on_click,
+                ),
+                border=ft.Border(bottom=ft.BorderSide(1, C.border)),
+            )
+
+        async def close_drawer():
+            try:
+                await self.page.close_drawer()
+            except Exception:
+                pass
+
+        def after_close(fn):
+            async def _run(_e=None):
+                await close_drawer()
+                fn()
+
+            return lambda e: self.page.run_task(_run, e)
+
+        return ft.NavigationDrawer(
+            bgcolor=C.surface,
+            indicator_color=C.primary_dim,
+            on_dismiss=lambda e: setattr(self, "_drawer_open", False),
+            controls=[
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            self._drawer_profile_avatar(),
+                            ft.Text(
+                                self._user_display_name(),
+                                size=18,
+                                weight=ft.FontWeight.W_700,
+                                color=C.text,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                            muted(phone),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=8,
+                    ),
+                    padding=ft.Padding.only(top=28, bottom=16, left=16, right=16),
+                ),
+                tile(
+                    ft.Icons.TRANSLATE,
+                    self._("language"),
+                    after_close(lambda: self._toggle_language()),
+                ),
+                tile(
+                    ft.Icons.HELP_OUTLINE,
+                    self._("help"),
+                    after_close(lambda: self._show_help()),
+                ),
+                tile(
+                    ft.Icons.LOGOUT,
+                    self._("sign_out"),
+                    after_close(lambda: self._logout(None)),
+                ),
+            ],
+        )
+
+    def _ensure_profile_drawer(self):
+        self.page.drawer = self._build_profile_drawer()
+
+    async def _open_profile_drawer(self, _e=None):
+        self._ensure_profile_drawer()
+        self.page.update()
+        try:
+            self._drawer_open = True
+            await self.page.show_drawer()
+        except Exception as exc:
+            self._drawer_open = False
+            self.toast(str(exc), error=True)
+
+    async def _dismiss_overlays(self):
+        try:
+            self.page.pop_dialog()
+        except Exception:
+            pass
+        try:
+            self._drawer_open = False
+            await self.page.close_drawer()
+        except Exception:
+            pass
+
+    async def _open_avatar_viewer(self, _e=None):
+        try:
+            self._drawer_open = False
+            await self.page.close_drawer()
+        except Exception:
+            pass
+
+        url = (self.session.user or {}).get("avatar_url")
+        has_photo = bool(url)
+        preview_size = 220.0
+
+        if has_photo:
+            preview: ft.Control = ft.Container(
+                content=ft.Image(
+                    src=str(url),
+                    width=preview_size,
+                    height=preview_size,
+                    fit=ft.BoxFit.COVER,
+                    border_radius=preview_size / 2,
+                ),
+                width=preview_size,
+                height=preview_size,
+                border_radius=preview_size / 2,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                border=ft.Border.all(2, C.border),
+                alignment=ft.Alignment.CENTER,
+            )
+        else:
+            preview = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(ft.Icons.PERSON, size=72, color=C.primary),
+                        muted(self._("no_profile_photo")),
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=10,
+                ),
+                width=preview_size,
+                height=preview_size,
+                bgcolor=C.surface_alt,
+                border_radius=preview_size / 2,
+                border=ft.Border.all(2, C.border),
+                alignment=ft.Alignment.CENTER,
+            )
+
+        photo_actions = [
+            ft.IconButton(
+                icon=ft.Icons.PHOTO_CAMERA_OUTLINED,
+                icon_color=C.bg,
+                bgcolor=C.primary,
+                tooltip=self._("change_photo") if has_photo else self._("add_photo"),
+                on_click=lambda e: self.page.run_task(self._change_avatar),
+            ),
+        ]
+        if has_photo:
+            photo_actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    icon_color=C.text,
+                    bgcolor=C.surface_alt,
+                    tooltip=self._("remove_photo"),
+                    on_click=lambda e: self.page.run_task(self._remove_avatar),
+                )
+            )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.surface,
+            title=ft.Text(
+                self._("profile_photo"),
+                color=C.text,
+                weight=ft.FontWeight.W_700,
+            ),
+            content=ft.Container(
+                width=260,
+                content=ft.Column(
+                    [
+                        preview,
+                        ft.Row(
+                            photo_actions,
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.CENTER,
+                        ),
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=12,
+                    tight=True,
+                ),
+                alignment=ft.Alignment.CENTER,
+                padding=ft.Padding.only(top=4, bottom=4),
+            ),
+            actions=[],
+        )
+        self.page.show_dialog(dialog)
+
+    async def _change_avatar(self):
+        await self._dismiss_overlays()
+        files = await self.file_picker.pick_files(
+            allow_multiple=False,
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["jpg", "jpeg", "png", "webp", "gif"],
+        )
+        if not files:
+            return
+        path = Path(files[0].path)
+        try:
+            await asyncio.to_thread(self.api.upload_avatar, path)
+            self.toast(self._("photo_updated"))
             self.go_home()
         except ApiError as e:
             self.toast(e.message, error=True)
+        except Exception as e:
+            self.toast(str(e), error=True)
+
+    async def _remove_avatar(self):
+        await self._dismiss_overlays()
+        try:
+            await asyncio.to_thread(self.api.delete_avatar)
+            self.toast(self._("photo_removed"))
+            self.go_home()
+        except ApiError as e:
+            self.toast(e.message, error=True)
+        except Exception as e:
+            self.toast(str(e), error=True)
 
     # ── Home ────────────────────────────────────────────────────
     def go_home(self):
-        user = self.session.user or {}
+        self._set_back(None)
+        self._ensure_profile_drawer()
         list_view = ft.ReorderableListView(
             expand=True,
             spacing=0,
@@ -563,31 +1207,26 @@ class QRVaultApp:
         filter_row = ft.Row(spacing=8, visible=False)
         self._home_filter_row = filter_row
 
+        avatar_btn = ft.Container(
+            content=self._avatar_image(size=48),
+            on_click=lambda e: self.page.run_task(self._open_profile_drawer),
+            ink=True,
+            border_radius=24,
+            tooltip=self._("profile"),
+        )
         header = ft.Row(
             [
-                ft.Column(
-                    [
-                        muted(self._("signed_in_as")),
-                        ft.Text(
-                            user.get("first_name") or user.get("phone") or "User",
-                            size=22,
-                            weight=ft.FontWeight.BOLD,
-                            color=C.text,
-                        ),
-                    ],
-                    spacing=2,
-                    expand=True,
-                ),
-                self._lang_button(),
-                ghost_button(self._("sign_out"), self._logout, ft.Icons.LOGOUT),
-            ]
+                avatar_btn,
+                ft.Container(expand=True),
+                ghost_button(self._("help"), lambda e: self._show_help(), ft.Icons.HELP_OUTLINE),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         actions = ft.Row(
             [
                 primary_button(self._("scan_qr"), lambda e: self.go_scan(), ft.Icons.QR_CODE_SCANNER, expand=True),
                 ghost_button(self._("refresh"), lambda e: self.page.run_task(self._refresh_home, list_view)),
-                ghost_button(self._("help"), lambda e: self._show_help(), ft.Icons.HELP_OUTLINE),
             ],
             spacing=10,
         )
@@ -615,6 +1254,10 @@ class QRVaultApp:
         self.page.run_task(self._refresh_home, list_view)
 
     def _logout(self, _):
+        try:
+            self.page.drawer = None
+        except Exception:
+            pass
         self.session.clear()
         self.go_login()
 
@@ -970,6 +1613,11 @@ class QRVaultApp:
             return False
 
     def go_scan(self):
+        def leave_scan(_e=None):
+            self.page.run_task(self._stop_scan_camera)
+            self.go_home()
+
+        self._set_back(leave_scan)
         self.page.run_task(self._stop_scan_camera)
         self._scan_busy = False
         self._scan_decode_pending = False
@@ -1018,10 +1666,6 @@ class QRVaultApp:
                 return
             self.page.run_task(self._scan, qr.value.strip())
 
-        def leave(_):
-            self.page.run_task(self._stop_scan_camera)
-            self.go_home()
-
         def capture(_):
             self.page.run_task(self._capture_scan_frame)
 
@@ -1039,7 +1683,7 @@ class QRVaultApp:
                 [
                     ft.Row(
                         [
-                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=leave),
+                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
                             section_title(self._("scan_title")),
                             ft.Container(expand=True),
                             self._info_button("scan_help_tooltip", "scan_title"),
@@ -1373,6 +2017,7 @@ class QRVaultApp:
         return self._perm() == "owner"
 
     def go_storage(self):
+        self._set_back(self.go_home)
         s = self.current_storage or {}
         sid = s.get("id")
         files_host = ft.Container(
@@ -1572,7 +2217,7 @@ class QRVaultApp:
         body_controls = [
             ft.Row(
                 [
-                    ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=lambda e: self.go_home()),
+                    ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
                     ft.Column(
                         [
                             ft.Row(title_controls, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -2844,8 +3489,9 @@ class QRVaultApp:
             self._stop_pdf_server()
             self.page.run_task(self._open_storage, storage_id)
 
+        self._set_back(_back)
         actions: list[ft.Control] = [
-            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=_back),
+            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
             ft.Column(
                 [
                     ft.Text(
@@ -3017,6 +3663,11 @@ class QRVaultApp:
         if is_pdf(content_type, name):
             self.page.run_task(self._open_pdf_official, storage_id, name, path)
             return
+
+        def _back(_e=None):
+            self.page.run_task(self._open_storage, storage_id)
+
+        self._set_back(_back)
         media = self._build_full_media(name, path, content_type)
         frame = ft.Container(
             content=media,
@@ -3035,9 +3686,7 @@ class QRVaultApp:
                             ft.IconButton(
                                 ft.Icons.ARROW_BACK,
                                 icon_color=C.text,
-                                on_click=lambda e: self.page.run_task(
-                                    self._open_storage, storage_id
-                                ),
+                                on_click=self._request_back,
                             ),
                             ft.Column(
                                 [
@@ -3469,6 +4118,7 @@ class QRVaultApp:
     def go_merge(self):
         s = self.current_storage or {}
         sid = s.get("id")
+        self._set_back(lambda: self.page.run_task(self._open_storage, sid))
         files_col = ft.ListView(expand=True, spacing=6, padding=0)
         selected: dict[int, bool] = {}
         order: list[int] = []
@@ -3523,7 +4173,7 @@ class QRVaultApp:
                             ft.IconButton(
                                 ft.Icons.ARROW_BACK,
                                 icon_color=C.text,
-                                on_click=lambda e: self.page.run_task(self._open_storage, sid),
+                                on_click=self._request_back,
                             ),
                             section_title("Merge to PDF"),
                         ]
@@ -3649,6 +4299,7 @@ class QRVaultApp:
     def go_archive(self):
         s = self.current_storage or {}
         sid = s.get("id")
+        self._set_back(lambda: self.page.run_task(self._open_storage, sid))
         can_write = self._can_write()
         files_col = ft.ListView(expand=True, spacing=8, padding=0)
 
@@ -3660,7 +4311,7 @@ class QRVaultApp:
                             ft.IconButton(
                                 ft.Icons.ARROW_BACK,
                                 icon_color=C.text,
-                                on_click=lambda e: self.page.run_task(self._open_storage, sid),
+                                on_click=self._request_back,
                             ),
                             section_title("Archived files"),
                         ]
@@ -3788,6 +4439,7 @@ class QRVaultApp:
     def go_share(self):
         s = self.current_storage or {}
         sid = s.get("id")
+        self._set_back(lambda: self.page.run_task(self._open_storage, sid))
         phone = ft.TextField(
             label="Phone to share with",
             hint_text="+9715...",
@@ -3827,7 +4479,7 @@ class QRVaultApp:
                             ft.IconButton(
                                 ft.Icons.ARROW_BACK,
                                 icon_color=C.text,
-                                on_click=lambda e: self.page.run_task(self._open_storage, sid),
+                                on_click=self._request_back,
                             ),
                             section_title("Share storage"),
                         ]

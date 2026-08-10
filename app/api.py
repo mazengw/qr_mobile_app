@@ -11,11 +11,19 @@ from .state import Session
 
 
 class ApiError(Exception):
-    def __init__(self, message: str, status_code: int | None = None, details: Any = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        details: Any = None,
+        *,
+        code: str | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.details = details
+        self.code = code
 
 
 class VaultAPI:
@@ -40,12 +48,73 @@ class VaultAPI:
             data = {"detail": response.text}
         if response.is_success:
             return data
-        detail = data.get("detail") if isinstance(data, dict) else data
-        if isinstance(detail, list):
-            detail = "; ".join(str(x) for x in detail)
-        elif isinstance(detail, dict):
-            detail = "; ".join(f"{k}: {v}" for k, v in detail.items())
-        raise ApiError(str(detail or "Request failed"), response.status_code, data)
+        code, message = self._parse_error(data)
+        raise ApiError(message, response.status_code, data, code=code)
+
+    @staticmethod
+    def _parse_error(data: Any) -> tuple[str | None, str]:
+        """Return (error_code, human message) from a DRF error payload."""
+
+        def fmt_val(v: Any) -> str:
+            if isinstance(v, list):
+                return "; ".join(fmt_val(x) for x in v)
+            if isinstance(v, dict):
+                return "; ".join(f"{k}: {fmt_val(x)}" for k, x in v.items())
+            return str(v)
+
+        known = {
+            "INVALID_PHONE",
+            "PHONE_EXISTS",
+            "DISPLAY_NAME_REQUIRED",
+            "PASSWORD_TOO_SHORT",
+            "PASSWORD_MISMATCH",
+            "PASSWORD_REQUIRED",
+            "INVALID_CREDENTIALS",
+            "ACCOUNT_DISABLED",
+            "INVALID_OTP",
+        }
+
+        def find_code(v: Any) -> str | None:
+            if isinstance(v, str):
+                token = v.strip()
+                # DRF may wrap: "ErrorDetail(...)" already stringified as code
+                if token in known:
+                    return token
+                for k in known:
+                    if k in token:
+                        return k
+                return None
+            if isinstance(v, list):
+                for item in v:
+                    c = find_code(item)
+                    if c:
+                        return c
+                return None
+            if isinstance(v, dict):
+                for item in v.values():
+                    c = find_code(item)
+                    if c:
+                        return c
+                return None
+            return None
+
+        if not isinstance(data, dict):
+            return None, str(data or "Request failed")
+
+        code = find_code(data)
+        if "detail" in data:
+            return code, fmt_val(data["detail"]) or "Request failed"
+
+        parts: list[str] = []
+        if "non_field_errors" in data:
+            parts.append(fmt_val(data["non_field_errors"]))
+        for key, val in data.items():
+            if key in ("status_code", "non_field_errors"):
+                continue
+            msg = fmt_val(val)
+            if msg:
+                parts.append(msg if code else f"{key}: {msg}")
+        return code, ("; ".join(parts) or "Request failed")
 
     def request_otp(self, phone: str) -> dict:
         with httpx.Client(timeout=30) as client:
@@ -62,10 +131,80 @@ class VaultAPI:
             self.session.set_auth(data["access"], data["refresh"], data["user"])
             return data
 
+    def login(self, phone: str, password: str) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.post(
+                self._url("/api/auth/login/"),
+                json={"phone": phone, "password": password},
+            )
+            data = self._handle(r)
+            self.session.set_auth(data["access"], data["refresh"], data["user"])
+            return data
+
+    def register(
+        self,
+        phone: str,
+        password: str,
+        password_confirm: str,
+        display_name: str,
+    ) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.post(
+                self._url("/api/auth/register/"),
+                json={
+                    "phone": phone,
+                    "password": password,
+                    "password_confirm": password_confirm,
+                    "display_name": display_name,
+                },
+            )
+            data = self._handle(r)
+            self.session.set_auth(data["access"], data["refresh"], data["user"])
+            return data
+
     def me(self) -> dict:
         with httpx.Client(timeout=30) as client:
             r = client.get(self._url("/api/auth/me/"), headers=self._headers())
             return self._handle(r)
+
+    def update_me(self, *, display_name: str | None = None) -> dict:
+        payload: dict[str, Any] = {}
+        if display_name is not None:
+            payload["display_name"] = display_name
+        with httpx.Client(timeout=30) as client:
+            r = client.patch(
+                self._url("/api/auth/me/"),
+                headers=self._headers(),
+                json=payload,
+            )
+            data = self._handle(r)
+            if isinstance(data, dict):
+                self.session.user = data
+                self.session.save()
+            return data
+
+    def upload_avatar(self, path: Path) -> dict:
+        with httpx.Client(timeout=60) as client:
+            with path.open("rb") as f:
+                r = client.post(
+                    self._url("/api/auth/me/avatar/"),
+                    headers=self._headers(),
+                    files={"avatar": (path.name, f)},
+                )
+            data = self._handle(r)
+            if isinstance(data, dict):
+                self.session.user = data
+                self.session.save()
+            return data
+
+    def delete_avatar(self) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.delete(self._url("/api/auth/me/avatar/"), headers=self._headers())
+            data = self._handle(r)
+            if isinstance(data, dict):
+                self.session.user = data
+                self.session.save()
+            return data
 
     def list_storages(self) -> list[dict]:
         with httpx.Client(timeout=30) as client:
