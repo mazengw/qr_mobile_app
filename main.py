@@ -2717,14 +2717,30 @@ class QRVaultApp:
         rows = await self._upload_menu_photos(multiple=False)
         return rows[0] if rows else None
 
-    def _open_external(self, url: str):
+    async def _open_external_url(self, url: str):
         target = (url or "").strip()
         if not target:
             return
         try:
+            from flet.controls.services.url_launcher import LaunchMode, UrlLauncher
+
+            await UrlLauncher().launch_url(
+                target,
+                mode=LaunchMode.EXTERNAL_APPLICATION,
+            )
+            return
+        except Exception:
+            pass
+        try:
             webbrowser.open(target)
         except Exception as e:
             self.toast(str(e), error=True)
+
+    def _open_external(self, url: str):
+        target = (url or "").strip()
+        if not target:
+            return
+        self.page.run_task(self._open_external_url, target)
 
     def _action_chip(self, label: str, icon, url: str, color: str) -> ft.Control:
         return ft.Container(
@@ -5025,7 +5041,7 @@ class QRVaultApp:
                     ft.Icons.REFRESH,
                     icon_color=C.text,
                     tooltip=self._("pdf_reopen"),
-                    on_click=lambda e, u=viewer_url: webbrowser.open(u),
+                    on_click=lambda e, u=viewer_url: self._open_external(u),
                 )
             )
         actions.append(
