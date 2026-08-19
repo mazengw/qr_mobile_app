@@ -8,10 +8,12 @@ requires-python = ">=3.12,<3.14"
 [tool.flet]
 org = "com.qrvault"
 product = "QR Vault"
-permissions = ["camera"]
+permissions = ["camera", "location"]
 
 [tool.flet.android.permission]
 "android.permission.CAMERA" = true
+"android.permission.ACCESS_FINE_LOCATION" = true
+"android.permission.ACCESS_COARSE_LOCATION" = true
 
 [tool.flet.android.feature]
 "android.hardware.camera" = false
@@ -23,3 +25,4 @@ usesCleartextTraffic = "true"
 
 [tool.flet.ios.info]
 NSCameraUsageDescription = "QR Vault uses the camera to scan vault QR codes."
+NSLocationWhenInUseUsageDescription = "QR Vault uses your location to pin the restaurant on the map."

@@ -16,6 +16,24 @@ import flet_video as ftv
 
 from app.api import ApiError, VaultAPI
 from app.i18n import LANG_AR, LANG_EN, normalize_lang, t
+from app.menu_data import (
+    ALLERGENS,
+    COLOR_PRESETS,
+    CURRENCY_OPTIONS,
+    SOCIAL_NETWORKS,
+    clone_menu,
+    empty_product,
+    empty_section,
+    format_hours_range,
+    format_menu_price,
+    mailto_href,
+    maps_href,
+    normalize_ampm_time,
+    normalize_menu_data,
+    social_href,
+    tel_href,
+    whatsapp_href,
+)
 from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_text_control, wrap_selection
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
@@ -38,6 +56,11 @@ try:
     import flet_webview as fwv
 except ImportError:  # pragma: no cover - optional until requirements install
     fwv = None
+
+try:
+    import flet_geolocator as fgeo
+except ImportError:  # pragma: no cover
+    fgeo = None
 
 
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "qr_vault_preview"
@@ -169,6 +192,10 @@ class QRVaultApp:
         self._auth_error_banner_box: ft.Container | None = None
         self._back_handler = None  # callable for system / gesture back
         self._drawer_open = False
+        self._menu_image_cache: dict[int, str] = {}
+        self._menu_draft: dict | None = None
+        self._menu_category_id: str | None = None
+        self._geolocator = None
 
         # FilePicker is a Service in Flet >=0.80 — do not add to page.overlay
         self.file_picker = ft.FilePicker()
@@ -1321,17 +1348,22 @@ class QRVaultApp:
         badges = [chip(self._("shared") if is_shared else self._("owned"), color)]
         if is_public:
             badges.insert(0, chip(self._("public"), C.accent))
+        if (s.get("kind") or "vault") == "menu":
+            badges.insert(0, chip(self._("menu_badge"), C.primary))
+        leading_icon = ft.Icons.RESTAURANT_MENU if (s.get("kind") or "vault") == "menu" else ft.Icons.QR_CODE_2
         return ft.Container(
             content=ft.ListTile(
                 leading=ft.Container(
-                    content=ft.Icon(ft.Icons.QR_CODE_2, color=C.bg),
+                    content=ft.Icon(leading_icon, color=C.bg),
                     bgcolor=color,
                     padding=10,
                     border_radius=12,
                 ),
                 title=ft.Text(s.get("title") or self._("storage_fallback", qr=s.get("qr_code")), color=C.text, weight=ft.FontWeight.W_600),
                 subtitle=ft.Text(
-                    f"QR: {s.get('qr_code')}  ·  {self._('files_count', n=s.get('file_count', 0))}  ·  {self._perm_text(s.get('my_permission'))}",
+                    f"QR: {s.get('qr_code')}  ·  {self._('files_count', n=s.get('file_count', 0))}  ·  {self._perm_text(s.get('my_permission'))}"
+                    if (s.get("kind") or "vault") != "menu"
+                    else f"QR: {s.get('qr_code')}  ·  {self._('menu_badge')}  ·  {self._perm_text(s.get('my_permission'))}",
                     color=C.text_muted,
                     size=12,
                 ),
@@ -1963,6 +1995,7 @@ class QRVaultApp:
             self._offline_mode = False
             self.file_search = ""
             self.file_filter = "all"
+            self._menu_category_id = None
             self.offline.upsert_home_storage(storage)
             self.go_storage()
         except (ApiError, Exception) as e:
@@ -1978,6 +2011,7 @@ class QRVaultApp:
                 self._offline_mode = True
                 self.file_search = ""
                 self.file_filter = "all"
+                self._menu_category_id = None
                 self.toast(self._("offline_cached_vault"))
                 self.go_storage()
                 return
@@ -2019,6 +2053,9 @@ class QRVaultApp:
     def go_storage(self):
         self._set_back(self.go_home)
         s = self.current_storage or {}
+        if self._is_menu_storage(s):
+            self.go_menu()
+            return
         sid = s.get("id")
         files_host = ft.Container(
             expand=True,
@@ -2187,6 +2224,7 @@ class QRVaultApp:
             )
 
         public_card = ft.Container()
+        menu_card = ft.Container()
         if self._is_owner() and sid:
             public_switch = ft.Switch(
                 value=is_public,
@@ -2207,6 +2245,31 @@ class QRVaultApp:
                         ),
                         self._info_button("public_vault_tip", "public_vault"),
                         public_switch,
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            )
+            menu_switch = ft.Switch(
+                value=False,
+                active_color=C.primary,
+                on_change=lambda e, st=sid: self.page.run_task(
+                    self._toggle_menu_kind, st, bool(e.control.value)
+                ),
+            )
+            menu_card = card(
+                ft.Row(
+                    [
+                        ft.Text(
+                            self._("digital_menu"),
+                            weight=ft.FontWeight.W_700,
+                            color=C.text,
+                            size=13,
+                            expand=True,
+                        ),
+                        self._info_button("digital_menu_tip", "digital_menu"),
+                        menu_switch,
                     ],
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2238,6 +2301,7 @@ class QRVaultApp:
             ),
             sync_banner,
             public_card,
+            menu_card,
             ft.Row(top_actions, spacing=10, scroll=ft.ScrollMode.AUTO) if top_actions else ft.Container(),
             ft.Row(
                 [
@@ -2493,6 +2557,1453 @@ class QRVaultApp:
         except Exception as e:
             self.toast(str(e), error=True)
             self.go_storage()
+
+    async def _toggle_menu_kind(self, storage_id: int, enabled: bool):
+        try:
+            storage = await asyncio.to_thread(
+                self.api.set_storage_kind,
+                storage_id,
+                "menu" if enabled else "vault",
+            )
+            self.current_storage = storage
+            self.offline.upsert_home_storage(storage)
+            self.toast(self._("menu_enabled") if enabled else self._("menu_disabled"))
+            self.go_storage()
+        except ApiError as e:
+            self.toast(e.message, error=True)
+            self.go_storage()
+        except Exception as e:
+            self.toast(str(e), error=True)
+            self.go_storage()
+
+    def _is_menu_storage(self, storage: dict | None = None) -> bool:
+        s = storage if storage is not None else self.current_storage
+        return ((s or {}).get("kind") or "vault") == "menu"
+
+    def _menu_file_id(self, value) -> int | None:
+        if value in (None, "", False, 0, "0"):
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    def _menu_file_name(self, file_id: int) -> str:
+        sources = []
+        if self.current_storage:
+            sources.extend(self.current_storage.get("files") or [])
+        sources.extend(self._storage_files_cache or [])
+        for row in sources:
+            if self._menu_file_id(row.get("id")) == file_id:
+                return row.get("original_name") or f"menu_{file_id}.jpg"
+        return f"menu_{file_id}.jpg"
+
+    def _menu_photo_box(
+        self,
+        file_id,
+        *,
+        width: int | None = 88,
+        height: int = 88,
+        radius: int = 16,
+        fallback_icon=ft.Icons.FASTFOOD_OUTLINED,
+    ) -> tuple[ft.Container, int | None]:
+        fid = self._menu_file_id(file_id)
+        cached = self._menu_image_cache.get(fid) if fid else None
+        if cached:
+            img_kwargs: dict = {"src": cached, "height": height, "fit": ft.BoxFit.COVER}
+            if width:
+                img_kwargs["width"] = width
+            content: ft.Control = ft.Image(**img_kwargs)
+        else:
+            content = ft.Icon(fallback_icon, size=min(34, max(18, height // 3)), color="#FFFFFF88")
+        box = ft.Container(
+            content=content,
+            width=width,
+            height=height,
+            bgcolor="#0B1220",
+            border_radius=radius,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            alignment=ft.Alignment.CENTER,
+        )
+        return box, fid
+
+    async def _hydrate_menu_images(self, storage_id: int, jobs: list[tuple[int, ft.Container]]):
+        for file_id, box in jobs:
+            if file_id in self._menu_image_cache:
+                src = self._menu_image_cache[file_id]
+            else:
+                try:
+                    path = await self._cache_file(
+                        storage_id, file_id, self._menu_file_name(file_id)
+                    )
+                    src = str(path)
+                    self._menu_image_cache[file_id] = src
+                except Exception:
+                    continue
+            w = box.width
+            h = int(box.height or 88)
+            img_kwargs: dict = {"src": src, "height": h, "fit": ft.BoxFit.COVER}
+            if w:
+                img_kwargs["width"] = int(w)
+            box.content = ft.Image(**img_kwargs)
+            try:
+                box.update()
+            except Exception:
+                pass
+
+    async def _pick_image_paths(self, *, multiple: bool = False) -> list[Path]:
+        try:
+            files = await self.file_picker.pick_files(
+                allow_multiple=multiple,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["jpg", "jpeg", "png", "webp", "gif", "bmp"],
+            )
+        except Exception as e:
+            self.toast(f"File picker error: {e}", error=True)
+            return []
+        if not files:
+            return []
+        paths: list[Path] = []
+        for f in files:
+            path = getattr(f, "path", None)
+            if path:
+                paths.append(Path(path))
+                continue
+            data = getattr(f, "bytes", None)
+            if data is None:
+                continue
+            tmp = Path(tempfile.gettempdir()) / f"qr_vault_menu_{f.name}"
+            tmp.write_bytes(data)
+            paths.append(tmp)
+        if not paths:
+            self.toast("Could not read selected image", error=True)
+        return paths
+
+    async def _pick_image_path(self) -> Path | None:
+        paths = await self._pick_image_paths(multiple=False)
+        return paths[0] if paths else None
+
+    async def _upload_menu_photos(self, *, multiple: bool = False) -> list[dict]:
+        if not self.current_storage:
+            return []
+        if not self._can_write():
+            self.toast(self._("read_only"), error=True)
+            return []
+        paths = await self._pick_image_paths(multiple=multiple)
+        uploaded: list[dict] = []
+        sid = self.current_storage["id"]
+        for path in paths:
+            try:
+                row = await asyncio.to_thread(self.api.upload_file, sid, str(path))
+            except ApiError as e:
+                self.toast(e.message, error=True)
+                continue
+            except Exception as e:
+                self.toast(str(e), error=True)
+                continue
+            if not isinstance(row, dict):
+                continue
+            fid = self._menu_file_id(row.get("id"))
+            if fid:
+                self._menu_image_cache[fid] = str(path)
+                files = list((self.current_storage or {}).get("files") or [])
+                files.append(row)
+                self.current_storage["files"] = files
+            uploaded.append(row)
+        return uploaded
+
+    async def _upload_menu_photo(self) -> dict | None:
+        rows = await self._upload_menu_photos(multiple=False)
+        return rows[0] if rows else None
+
+    def _open_external(self, url: str):
+        target = (url or "").strip()
+        if not target:
+            return
+        try:
+            webbrowser.open(target)
+        except Exception as e:
+            self.toast(str(e), error=True)
+
+    def _action_chip(self, label: str, icon, url: str, color: str) -> ft.Control:
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(icon, size=16, color="#0B1220"),
+                    ft.Text(label, size=12, weight=ft.FontWeight.W_700, color="#0B1220"),
+                ],
+                spacing=6,
+                tight=True,
+            ),
+            bgcolor=color,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border_radius=999,
+            ink=True,
+            on_click=lambda e, u=url: self._open_external(u),
+        )
+
+    def _social_button(self, kind: str, value: str, color: str) -> ft.Control | None:
+        href = social_href(kind, value)
+        if not href:
+            return None
+        icons = {
+            "instagram": ft.Icons.CAMERA_ALT,
+            "facebook": ft.Icons.FACEBOOK,
+            "tiktok": ft.Icons.MUSIC_NOTE,
+            "twitter": ft.Icons.ALTERNATE_EMAIL,
+            "snapchat": ft.Icons.CHAT_BUBBLE,
+            "website": ft.Icons.LANGUAGE,
+        }
+        return ft.Container(
+            content=ft.Icon(icons.get(kind, ft.Icons.LINK), size=20, color="#FFFFFF"),
+            width=44,
+            height=44,
+            bgcolor=color,
+            border_radius=22,
+            alignment=ft.Alignment.CENTER,
+            ink=True,
+            tooltip=self._(f"social_{kind}"),
+            on_click=lambda e, u=href: self._open_external(u),
+        )
+
+    def _editor_text_field(self, label: str, value: str, *, multiline: bool = False) -> ft.TextField:
+        return ft.TextField(
+            label=label,
+            value=value or "",
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+            multiline=multiline,
+            min_lines=2 if multiline else 1,
+            max_lines=3 if multiline else 1,
+            expand=True,
+            text_size=14,
+        )
+
+    def _ampm_time_dropdowns(self, value: dict | None, *, side: str) -> tuple[ft.Dropdown, ft.Dropdown, ft.Dropdown]:
+        t = normalize_ampm_time(value, side=side)
+        hour = str(t.get("h") or (10 if side == "from" else 9))
+        minute = f"{int(t.get('m') or 0):02d}"
+        ampm = "PM" if str(t.get("ampm") or ("AM" if side == "from" else "PM")).upper() == "PM" else "AM"
+        style = dict(
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            color=C.text,
+            dense=True,
+        )
+        hour_dd = ft.Dropdown(
+            label=self._("hour"),
+            value=hour,
+            options=[ft.dropdown.Option(str(i), str(i)) for i in range(1, 13)],
+            expand=True,
+            **style,
+        )
+        minute_dd = ft.Dropdown(
+            label=self._("minute"),
+            value=minute,
+            options=[ft.dropdown.Option(f"{i:02d}", f"{i:02d}") for i in range(0, 60)],
+            expand=True,
+            **style,
+        )
+        ampm_dd = ft.Dropdown(
+            label=self._("ampm"),
+            value=ampm,
+            options=[
+                ft.dropdown.Option("AM", self._("am")),
+                ft.dropdown.Option("PM", self._("pm")),
+            ],
+            expand=True,
+            **style,
+        )
+        return hour_dd, minute_dd, ampm_dd
+
+    def _read_ampm_dropdowns(self, hour_dd, minute_dd, ampm_dd) -> dict:
+        try:
+            hour = int(hour_dd.value or 0)
+            minute = int(minute_dd.value or 0)
+        except (TypeError, ValueError):
+            hour, minute = 10, 0
+        return {
+            "h": min(12, max(1, hour or 1)),
+            "m": min(59, max(0, minute)),
+            "ampm": "PM" if str(ampm_dd.value or "AM").upper() == "PM" else "AM",
+        }
+
+    async def _capture_gps(self) -> tuple[float, float] | None:
+        if fph is not None:
+            try:
+                ph = fph.PermissionHandler()
+                loc_perm = getattr(fph.Permission, "LOCATION_WHEN_IN_USE", None) or getattr(
+                    fph.Permission, "LOCATION", None
+                )
+                if loc_perm:
+                    status = await ph.request(loc_perm)
+                    allowed = (
+                        fph.PermissionStatus.GRANTED,
+                        fph.PermissionStatus.LIMITED,
+                        fph.PermissionStatus.PROVISIONAL,
+                    )
+                    if status not in allowed:
+                        self.toast(self._("gps_fail"), error=True)
+                        return None
+            except Exception:
+                pass
+        geo = self._geolocator
+        if geo is None and fgeo is not None:
+            try:
+                geo = fgeo.Geolocator()
+                self._geolocator = geo
+                services = getattr(self.page, "services", None)
+                if services is not None and geo not in services:
+                    services.append(geo)
+            except Exception as exc:
+                self.toast(str(exc), error=True)
+                return None
+        if geo is None:
+            self.toast(self._("gps_fail"), error=True)
+            return None
+        try:
+            if hasattr(geo, "request_permission"):
+                await geo.request_permission()
+            pos = await geo.get_current_position()
+            lat = float(getattr(pos, "latitude", None))
+            lng = float(getattr(pos, "longitude", None))
+            return lat, lng
+        except Exception as exc:
+            self.toast(f"{self._('gps_fail')} {exc}", error=True)
+            return None
+
+    def _menu_payload(self) -> dict:
+        s = self.current_storage or {}
+        return normalize_menu_data(
+            s.get("menu_data") or {},
+            restaurant_name=s.get("title") or "",
+        )
+
+    def go_menu(self):
+        """Public restaurant menu view for digital menu storages."""
+        self._set_back(self.go_home)
+        s = self.current_storage or {}
+        sid = s.get("id")
+        menu = self._menu_payload()
+        primary = menu.get("primary_color") or C.primary
+        can_write = self._can_write()
+        image_jobs: list[tuple[int, ft.Container]] = []
+
+        restaurant = menu.get("restaurant_name") or s.get("title") or self._("menu_badge")
+        description = (menu.get("description") or "").strip()
+        gallery_ids = [
+            fid
+            for fid in (self._menu_file_id(x) for x in (menu.get("gallery_file_ids") or []))
+            if fid
+        ]
+        cover_id = self._menu_file_id(menu.get("cover_file_id")) or (gallery_ids[0] if gallery_ids else None)
+        extra_ids = [fid for fid in gallery_ids if fid != cover_id]
+
+        cover_box, cover_box_id = self._menu_photo_box(
+            cover_id,
+            width=None,
+            height=210,
+            radius=0,
+            fallback_icon=ft.Icons.RESTAURANT,
+        )
+        cover_box.expand = True
+        cover_box.bgcolor = primary
+        if cover_box_id:
+            image_jobs.append((cover_box_id, cover_box))
+
+        logo_box, logo_id = self._menu_photo_box(
+            menu.get("logo_file_id"),
+            width=72,
+            height=72,
+            radius=36,
+            fallback_icon=ft.Icons.STOREFRONT,
+        )
+        logo_box.border = ft.Border.all(3, "#FFFFFF")
+        logo_box.shadow = ft.BoxShadow(blur_radius=16, color="#00000066", offset=ft.Offset(0, 4))
+        if logo_id:
+            image_jobs.append((logo_id, logo_box))
+
+        hero = ft.Container(
+            content=ft.Stack(
+                [
+                    cover_box,
+                    ft.Container(
+                        expand=True,
+                        gradient=ft.LinearGradient(
+                            begin=ft.Alignment.TOP_CENTER,
+                            end=ft.Alignment.BOTTOM_CENTER,
+                            colors=["#33000000", "#E6000000"],
+                        ),
+                    ),
+                    ft.Container(
+                        padding=ft.Padding.only(left=16, right=16, bottom=16, top=12),
+                        alignment=ft.Alignment.BOTTOM_LEFT,
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        logo_box,
+                                        ft.Column(
+                                            [
+                                                ft.Text(
+                                                    restaurant,
+                                                    size=26,
+                                                    weight=ft.FontWeight.BOLD,
+                                                    color="#FFFFFF",
+                                                ),
+                                                ft.Text(
+                                                    description or self._("our_menu"),
+                                                    size=13,
+                                                    color="#E2E8F0",
+                                                ),
+                                            ],
+                                            spacing=2,
+                                            expand=True,
+                                        ),
+                                    ],
+                                    spacing=12,
+                                    vertical_alignment=ft.CrossAxisAlignment.END,
+                                ),
+                            ],
+                            spacing=0,
+                        ),
+                    ),
+                ]
+            ),
+            height=220,
+            border_radius=22,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+        gallery_row: ft.Control = ft.Container()
+        if extra_ids:
+            thumbs: list[ft.Control] = []
+            for gid in extra_ids:
+                thumb, tid = self._menu_photo_box(gid, width=150, height=110, radius=16)
+                if tid:
+                    image_jobs.append((tid, thumb))
+                thumbs.append(thumb)
+            gallery_row = ft.Column(
+                [
+                    ft.Text(self._("gallery_title"), size=14, weight=ft.FontWeight.W_700, color=C.text),
+                    ft.Row(thumbs, spacing=10, scroll=ft.ScrollMode.AUTO),
+                ],
+                spacing=8,
+            )
+
+        contact_actions: list[ft.Control] = []
+        phone = (menu.get("phone") or "").strip()
+        whatsapp = (menu.get("whatsapp") or "").strip()
+        email = (menu.get("email") or "").strip()
+        address = (menu.get("address") or "").strip()
+        hours = format_hours_range(menu.get("hours_from"), menu.get("hours_to"), fallback=menu.get("hours") or "")
+        maps_url = maps_href(
+            address=address,
+            maps_url=menu.get("maps_url") or "",
+            lat=menu.get("lat"),
+            lng=menu.get("lng"),
+        )
+        if tel_href(phone):
+            contact_actions.append(self._action_chip(self._("call_now"), ft.Icons.CALL, tel_href(phone), primary))
+        if whatsapp_href(whatsapp):
+            contact_actions.append(
+                self._action_chip(self._("contact_whatsapp"), ft.Icons.CHAT, whatsapp_href(whatsapp), "#22C55E")
+            )
+        if maps_url:
+            contact_actions.append(self._action_chip(self._("open_maps"), ft.Icons.NEAR_ME, maps_url, C.accent))
+        if mailto_href(email):
+            contact_actions.append(self._action_chip(self._("contact_email"), ft.Icons.MAIL_OUTLINE, mailto_href(email), "#A855F7"))
+
+        contact_details: list[ft.Control] = []
+        if address:
+            contact_details.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.LOCATION_ON_OUTLINED, size=18, color=primary),
+                        ft.Text(address, color=C.text, size=13, expand=True),
+                    ],
+                    spacing=8,
+                )
+            )
+        if hours:
+            contact_details.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SCHEDULE, size=18, color=primary),
+                        ft.Text(hours, color=C.text, size=13, expand=True),
+                    ],
+                    spacing=8,
+                )
+            )
+        if phone:
+            contact_details.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.PHONE_OUTLINED, size=18, color=primary),
+                        ft.Text(phone, color=C.text, size=13, expand=True),
+                    ],
+                    spacing=8,
+                )
+            )
+        if email:
+            contact_details.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.ALTERNATE_EMAIL, size=18, color=primary),
+                        ft.Text(email, color=C.text, size=13, expand=True),
+                    ],
+                    spacing=8,
+                )
+            )
+
+        contact_card: ft.Control = ft.Container()
+        if contact_actions or contact_details:
+            contact_card = card(
+                ft.Column(
+                    [
+                        ft.Text(self._("contact_title"), size=16, weight=ft.FontWeight.BOLD, color=C.text),
+                        ft.Row(contact_actions, spacing=8, wrap=True) if contact_actions else ft.Container(),
+                        *contact_details,
+                    ],
+                    spacing=10,
+                ),
+                padding=14,
+            )
+
+        social = menu.get("social") if isinstance(menu.get("social"), dict) else {}
+        social_buttons = [
+            btn
+            for key, _label, _prefix in SOCIAL_NETWORKS
+            if (btn := self._social_button(key, social.get(key) or "", primary))
+        ]
+        footer: ft.Control = ft.Container()
+        if social_buttons:
+            footer = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(self._("social_title"), size=14, weight=ft.FontWeight.W_700, color=C.text),
+                        ft.Row(social_buttons, spacing=10, alignment=ft.MainAxisAlignment.CENTER),
+                    ],
+                    spacing=10,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.surface,
+                border=ft.Border.all(1, C.border),
+                border_radius=18,
+                padding=16,
+                margin=ft.Margin.only(top=8, bottom=20),
+            )
+
+        visible_sections = [sec for sec in menu.get("sections") or [] if sec.get("visible", True)]
+        selected_category = self._menu_category_id
+        if selected_category and not any(sec.get("id") == selected_category for sec in visible_sections):
+            selected_category = None
+            self._menu_category_id = None
+        shown_sections = [
+            sec for sec in visible_sections if not selected_category or sec.get("id") == selected_category
+        ]
+
+        def set_category(section_id: str | None):
+            self._menu_category_id = section_id
+            self.go_menu()
+
+        category_chips: list[ft.Control] = []
+        all_active = not selected_category
+        category_chips.append(
+            ft.Container(
+                content=ft.Text(
+                    self._("category_all"),
+                    size=12,
+                    weight=ft.FontWeight.W_700,
+                    color="#0B1220" if all_active else C.text,
+                ),
+                bgcolor=primary if all_active else C.surface_alt,
+                padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                border_radius=999,
+                border=ft.Border.all(1, primary if all_active else C.border),
+                ink=True,
+                on_click=lambda e: set_category(None),
+            )
+        )
+        for sec in visible_sections:
+            active = selected_category == sec.get("id")
+            category_chips.append(
+                ft.Container(
+                    content=ft.Text(
+                        sec.get("name") or "Section",
+                        size=12,
+                        weight=ft.FontWeight.W_700,
+                        color="#0B1220" if active else C.text,
+                    ),
+                    bgcolor=primary if active else C.surface_alt,
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                    border_radius=999,
+                    border=ft.Border.all(1, primary if active else C.border),
+                    ink=True,
+                    on_click=lambda e, sid=sec.get("id"): set_category(sid),
+                )
+            )
+
+        section_controls: list[ft.Control] = []
+        if not shown_sections:
+            section_controls.append(
+                card(
+                    ft.Column(
+                        [
+                            ft.Icon(ft.Icons.RESTAURANT_MENU, size=36, color=primary),
+                            muted(self._("menu_empty")),
+                        ],
+                        spacing=8,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
+                )
+            )
+
+        def allergen_row(codes: list) -> ft.Control:
+            labels = [label for code, label in ALLERGENS if code in (codes or [])]
+            if not labels:
+                return ft.Container()
+            chips = [
+                ft.Container(
+                    content=ft.Text(label, size=10, color=C.text_muted),
+                    bgcolor=C.surface_alt,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=999,
+                )
+                for label in labels
+            ]
+            return ft.Row(chips, spacing=6, wrap=True)
+
+        for sec in shown_sections:
+            products = [p for p in (sec.get("products") or []) if p.get("visible", True)]
+            product_cards: list[ft.Control] = []
+            currency = menu.get("currency") or "SYP"
+            for prod in products:
+                photo, photo_id = self._menu_photo_box(
+                    prod.get("image_file_id"),
+                    width=None,
+                    height=112,
+                    radius=14,
+                    fallback_icon=ft.Icons.FASTFOOD_OUTLINED,
+                )
+                photo.expand = True
+                if photo_id:
+                    image_jobs.append((photo_id, photo))
+                price = format_menu_price(prod.get("price") or "", currency) or self._("no_price")
+                desc = (prod.get("description") or "").strip()
+                product_cards.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                photo,
+                                ft.Text(
+                                    prod.get("name") or "—",
+                                    weight=ft.FontWeight.W_800,
+                                    color=C.text,
+                                    size=13,
+                                    max_lines=2,
+                                ),
+                                ft.Text(desc, color=C.text_muted, size=11, max_lines=2)
+                                if desc
+                                else ft.Container(),
+                                allergen_row(prod.get("allergens") or []),
+                                ft.Container(
+                                    content=ft.Text(
+                                        price,
+                                        color="#0B1220",
+                                        weight=ft.FontWeight.W_800,
+                                        size=12,
+                                    ),
+                                    bgcolor=primary,
+                                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                                    border_radius=10,
+                                    alignment=ft.Alignment.CENTER,
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        bgcolor=C.surface,
+                        border=ft.Border.all(1, C.border),
+                        border_radius=18,
+                        padding=8,
+                        shadow=ft.BoxShadow(
+                            blur_radius=12,
+                            color="#00000040",
+                            offset=ft.Offset(0, 4),
+                        ),
+                        expand=True,
+                    )
+                )
+            grid_rows: list[ft.Control] = []
+            for i in range(0, len(product_cards), 2):
+                left = product_cards[i]
+                right = product_cards[i + 1] if i + 1 < len(product_cards) else ft.Container(expand=True)
+                grid_rows.append(
+                    ft.Row(
+                        [
+                            ft.Container(content=left, expand=True),
+                            ft.Container(content=right, expand=True),
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                )
+            section_controls.append(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Container(width=4, height=22, bgcolor=primary, border_radius=4),
+                                ft.Text(
+                                    sec.get("name") or "Section",
+                                    size=20,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=C.text,
+                                    expand=True,
+                                ),
+                            ],
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Text(sec.get("description") or "", color=C.text_muted, size=12)
+                        if (sec.get("description") or "").strip()
+                        else ft.Container(),
+                        *grid_rows,
+                    ],
+                    spacing=10,
+                )
+            )
+
+        header_actions: list[ft.Control] = []
+        if can_write:
+            header_actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_NOTE,
+                    icon_color=primary,
+                    tooltip=self._("customize_menu"),
+                    on_click=lambda e: self.go_menu_editor(),
+                )
+            )
+        if self._is_owner():
+            header_actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.SETTINGS_OUTLINED,
+                    icon_color=C.text_muted,
+                    tooltip=self._("menu_manage"),
+                    on_click=lambda e: self.go_menu_editor(),
+                )
+            )
+        header_actions.append(
+            ft.IconButton(
+                icon=ft.Icons.HELP_OUTLINE,
+                icon_color=C.text_muted,
+                tooltip=self._("help"),
+                on_click=lambda e: self._show_help(),
+            )
+        )
+
+        body = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+                        ft.Column(
+                            [
+                                ft.Text(restaurant, size=16, weight=ft.FontWeight.BOLD, color=C.text),
+                                muted(self._("menu_badge") if can_write else self._("our_menu")),
+                            ],
+                            spacing=0,
+                            expand=True,
+                        ),
+                        *header_actions,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                hero,
+                gallery_row,
+                contact_card,
+                ft.Row(category_chips, spacing=8, scroll=ft.ScrollMode.AUTO)
+                if category_chips
+                else ft.Container(),
+                *section_controls,
+                footer,
+            ],
+            spacing=14,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        self.set_view(body)
+        if sid and image_jobs:
+            self.page.run_task(self._hydrate_menu_images, sid, image_jobs)
+
+    def go_menu_editor(self):
+        """Owner/writer customization for digital menu."""
+        if not self._can_write():
+            self.toast(self._("read_only"), error=True)
+            return
+        self._set_back(self.go_menu)
+        s = self.current_storage or {}
+        sid = s.get("id")
+        draft = clone_menu(self._menu_payload())
+        self._menu_draft = draft
+
+        name_field = ft.TextField(
+            label=self._("restaurant_name"),
+            value=draft.get("restaurant_name") or "",
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+        )
+        desc_field = ft.TextField(
+            label=self._("menu_description"),
+            value=draft.get("description") or "",
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+            multiline=True,
+            min_lines=2,
+            max_lines=4,
+        )
+        address_field = self._editor_text_field(self._("contact_address"), draft.get("address") or "", multiline=True)
+        phone_field = self._editor_text_field(self._("contact_phone"), draft.get("phone") or "")
+        whatsapp_field = self._editor_text_field(self._("contact_whatsapp"), draft.get("whatsapp") or "")
+        email_field = self._editor_text_field(self._("contact_email"), draft.get("email") or "")
+        open_h, open_m, open_ampm = self._ampm_time_dropdowns(draft.get("hours_from"), side="from")
+        close_h, close_m, close_ampm = self._ampm_time_dropdowns(draft.get("hours_to"), side="to")
+        lat_field = self._editor_text_field(self._("lat"), "" if draft.get("lat") is None else str(draft.get("lat")))
+        lng_field = self._editor_text_field(self._("lng"), "" if draft.get("lng") is None else str(draft.get("lng")))
+        maps_field = self._editor_text_field(self._("contact_maps"), draft.get("maps_url") or "")
+        currency_dd = ft.Dropdown(
+            label=self._("currency"),
+            value=draft.get("currency") or "SYP",
+            options=[
+                ft.dropdown.Option(code, f"{code} ({symbol})")
+                for code, symbol in CURRENCY_OPTIONS
+            ],
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            color=C.text,
+            expand=True,
+        )
+        social = draft.get("social") if isinstance(draft.get("social"), dict) else {}
+        social_fields = {
+            key: self._editor_text_field(self._(f"social_{key}"), social.get(key) or "")
+            for key, _label, _prefix in SOCIAL_NETWORKS
+        }
+        sections_host = ft.Column(spacing=10)
+        self._menu_sections_host = sections_host
+        photos_host = ft.Column(spacing=8)
+        photo_jobs: list[tuple[int, ft.Container]] = []
+        section_jobs: list[tuple[int, ft.Container]] = []
+
+        def hydrate_editor_photos():
+            jobs = photo_jobs + section_jobs
+            if sid and jobs:
+                self.page.run_task(self._hydrate_menu_images, sid, jobs)
+
+        def sync_draft_from_fields():
+            draft["restaurant_name"] = (name_field.value or "").strip()
+            draft["description"] = (desc_field.value or "").strip()
+            draft["address"] = (address_field.value or "").strip()
+            draft["phone"] = (phone_field.value or "").strip()
+            draft["whatsapp"] = (whatsapp_field.value or "").strip()
+            draft["email"] = (email_field.value or "").strip()
+            hours_from = self._read_ampm_dropdowns(open_h, open_m, open_ampm)
+            hours_to = self._read_ampm_dropdowns(close_h, close_m, close_ampm)
+            draft["hours_from"] = hours_from
+            draft["hours_to"] = hours_to
+            draft["hours"] = format_hours_range(hours_from, hours_to)
+            try:
+                draft["lat"] = float((lat_field.value or "").strip()) if (lat_field.value or "").strip() else None
+            except ValueError:
+                draft["lat"] = None
+            try:
+                draft["lng"] = float((lng_field.value or "").strip()) if (lng_field.value or "").strip() else None
+            except ValueError:
+                draft["lng"] = None
+            draft["maps_url"] = (maps_field.value or "").strip() or maps_href(
+                address=draft["address"],
+                lat=draft.get("lat"),
+                lng=draft.get("lng"),
+            )
+            draft["currency"] = currency_dd.value or "SYP"
+            draft["social"] = {
+                key: (field.value or "").strip()
+                for key, field in social_fields.items()
+            }
+            gallery = list(draft.get("gallery_file_ids") or [])
+            cover = self._menu_file_id(draft.get("cover_file_id"))
+            if cover and cover not in gallery:
+                gallery.insert(0, cover)
+            draft["gallery_file_ids"] = gallery
+            draft["cover_file_id"] = gallery[0] if gallery else cover
+
+        def make_photo_row(file_id, label: str, on_set, on_clear, jobs: list, *, circle: bool = False, size: int = 72) -> ft.Control:
+            box, fid = self._menu_photo_box(
+                file_id,
+                width=size,
+                height=size,
+                radius=size // 2 if circle else 14,
+                fallback_icon=ft.Icons.ADD_A_PHOTO_OUTLINED,
+            )
+            if fid:
+                jobs.append((fid, box))
+
+            async def pick(_e=None):
+                uploaded = await self._upload_menu_photo()
+                if not uploaded:
+                    return
+                on_set(uploaded.get("id"))
+                rebuild_photos()
+                rebuild_sections()
+                hydrate_editor_photos()
+
+            def clear(_e=None):
+                on_clear()
+                rebuild_photos()
+                rebuild_sections()
+                hydrate_editor_photos()
+
+            return ft.Row(
+                [
+                    box,
+                    ft.Column(
+                        [
+                            ft.Text(label, size=12, weight=ft.FontWeight.W_600, color=C.text),
+                            ft.Row(
+                                [
+                                    ghost_button(
+                                        self._("change_photo") if fid else label,
+                                        lambda e: self.page.run_task(pick),
+                                        ft.Icons.PHOTO_CAMERA_OUTLINED,
+                                    ),
+                                    ft.IconButton(
+                                        ft.Icons.CLOSE,
+                                        icon_color=C.danger,
+                                        tooltip=self._("remove_photo"),
+                                        visible=bool(fid),
+                                        on_click=clear,
+                                    ),
+                                ],
+                                spacing=4,
+                                wrap=True,
+                            ),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        def rebuild_photos():
+            photo_jobs.clear()
+            gallery_ids = [
+                fid
+                for fid in (self._menu_file_id(x) for x in (draft.get("gallery_file_ids") or []))
+                if fid
+            ]
+            thumbs: list[ft.Control] = []
+            for gid in gallery_ids:
+                box, fid = self._menu_photo_box(gid, width=84, height=84, radius=14)
+                if fid:
+                    photo_jobs.append((fid, box))
+
+                def remove_gallery(_e=None, remove_id=gid):
+                    draft["gallery_file_ids"] = [
+                        x for x in (draft.get("gallery_file_ids") or []) if self._menu_file_id(x) != remove_id
+                    ]
+                    if self._menu_file_id(draft.get("cover_file_id")) == remove_id:
+                        remaining = draft["gallery_file_ids"]
+                        draft["cover_file_id"] = remaining[0] if remaining else None
+                    rebuild_photos()
+                    hydrate_editor_photos()
+
+                def make_cover(_e=None, cover_id=gid):
+                    ids = [x for x in (draft.get("gallery_file_ids") or []) if self._menu_file_id(x) != cover_id]
+                    ids.insert(0, cover_id)
+                    draft["gallery_file_ids"] = ids
+                    draft["cover_file_id"] = cover_id
+                    rebuild_photos()
+                    hydrate_editor_photos()
+
+                thumbs.append(
+                    ft.Column(
+                        [
+                            ft.Stack(
+                                [
+                                    box,
+                                    ft.Container(
+                                        content=ft.Icon(ft.Icons.CLOSE, size=14, color="#FFFFFF"),
+                                        bgcolor="#E11D48",
+                                        width=22,
+                                        height=22,
+                                        border_radius=11,
+                                        alignment=ft.Alignment.CENTER,
+                                        right=4,
+                                        top=4,
+                                        ink=True,
+                                        on_click=remove_gallery,
+                                    ),
+                                ]
+                            ),
+                            ft.TextButton(
+                                self._("set_as_cover"),
+                                on_click=make_cover,
+                                visible=self._menu_file_id(draft.get("cover_file_id")) != gid,
+                            ),
+                        ],
+                        spacing=4,
+                        width=84,
+                    )
+                )
+
+            async def add_gallery(_e=None):
+                uploaded = await self._upload_menu_photos(multiple=True)
+                ids = list(draft.get("gallery_file_ids") or [])
+                for row in uploaded:
+                    fid = self._menu_file_id(row.get("id"))
+                    if fid and fid not in ids:
+                        ids.append(fid)
+                if ids and not draft.get("cover_file_id"):
+                    draft["cover_file_id"] = ids[0]
+                draft["gallery_file_ids"] = ids
+                rebuild_photos()
+                hydrate_editor_photos()
+
+            def set_cover_photo(fid):
+                draft["cover_file_id"] = fid
+                ids = [x for x in (draft.get("gallery_file_ids") or []) if self._menu_file_id(x) != fid]
+                if fid:
+                    ids.insert(0, fid)
+                draft["gallery_file_ids"] = ids
+
+            def clear_cover_photo():
+                cover = self._menu_file_id(draft.get("cover_file_id"))
+                draft["cover_file_id"] = None
+                if cover:
+                    draft["gallery_file_ids"] = [
+                        x for x in (draft.get("gallery_file_ids") or []) if self._menu_file_id(x) != cover
+                    ]
+
+            photos_host.controls = [
+                make_photo_row(
+                    draft.get("cover_file_id"),
+                    self._("add_cover_photo"),
+                    set_cover_photo,
+                    clear_cover_photo,
+                    photo_jobs,
+                    size=86,
+                ),
+                make_photo_row(
+                    draft.get("logo_file_id"),
+                    self._("add_logo"),
+                    lambda fid: draft.__setitem__("logo_file_id", fid),
+                    lambda: draft.__setitem__("logo_file_id", None),
+                    photo_jobs,
+                    circle=True,
+                    size=64,
+                ),
+                ft.Text(self._("gallery_title"), size=14, weight=ft.FontWeight.W_700, color=C.text),
+                ft.Row(
+                    [
+                        *thumbs,
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.Icon(ft.Icons.ADD_PHOTO_ALTERNATE_OUTLINED, color=C.primary),
+                                    ft.Text(self._("add_gallery_photos"), size=11, color=C.text_muted),
+                                ],
+                                spacing=4,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            width=84,
+                            height=84,
+                            bgcolor=C.surface_alt,
+                            border=ft.Border.all(1, C.border),
+                            border_radius=14,
+                            alignment=ft.Alignment.CENTER,
+                            ink=True,
+                            on_click=lambda e: self.page.run_task(add_gallery),
+                        ),
+                    ],
+                    spacing=8,
+                    wrap=True,
+                ),
+            ]
+            try:
+                photos_host.update()
+            except Exception:
+                pass
+
+        def rebuild_sections():
+            section_jobs.clear()
+            controls: list[ft.Control] = []
+            for si, sec in enumerate(draft.get("sections") or []):
+                product_controls: list[ft.Control] = []
+                for pi, prod in enumerate(sec.get("products") or []):
+                    pname = ft.TextField(
+                        label=self._("product_name"),
+                        value=prod.get("name") or "",
+                        border_radius=12,
+                        dense=True,
+                        bgcolor=C.surface,
+                        border_color=C.border,
+                        focused_border_color=C.primary,
+                        color=C.text,
+                        expand=True,
+                        on_change=lambda e, s_i=si, p_i=pi: draft["sections"][s_i]["products"][p_i].__setitem__(
+                            "name", e.control.value or ""
+                        ),
+                    )
+                    pprice = ft.TextField(
+                        label=self._("product_price"),
+                        value=prod.get("price") or "",
+                        border_radius=12,
+                        dense=True,
+                        bgcolor=C.surface,
+                        border_color=C.border,
+                        focused_border_color=C.primary,
+                        color=C.text,
+                        expand=True,
+                        keyboard_type=ft.KeyboardType.NUMBER,
+                        on_change=lambda e, s_i=si, p_i=pi: draft["sections"][s_i]["products"][p_i].__setitem__(
+                            "price", e.control.value or ""
+                        ),
+                    )
+                    pdesc = ft.TextField(
+                        label=self._("product_description"),
+                        value=prod.get("description") or "",
+                        border_radius=12,
+                        dense=True,
+                        bgcolor=C.surface,
+                        border_color=C.border,
+                        focused_border_color=C.primary,
+                        color=C.text,
+                        expand=True,
+                        on_change=lambda e, s_i=si, p_i=pi: draft["sections"][s_i]["products"][p_i].__setitem__(
+                            "description", e.control.value or ""
+                        ),
+                    )
+                    allergen_chips = []
+                    selected = set(prod.get("allergens") or [])
+
+                    def toggle_allergen(code: str, s_i: int, p_i: int):
+                        cur = set(draft["sections"][s_i]["products"][p_i].get("allergens") or [])
+                        if code in cur:
+                            cur.remove(code)
+                        else:
+                            cur.add(code)
+                        draft["sections"][s_i]["products"][p_i]["allergens"] = list(cur)
+                        rebuild_sections()
+
+                    for code, label in ALLERGENS:
+                        active = code in selected
+                        allergen_chips.append(
+                            ft.Container(
+                                content=ft.Text(label, size=11, color=C.bg if active else C.text),
+                                bgcolor=C.primary if active else C.surface_alt,
+                                padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                                border_radius=999,
+                                border=ft.Border.all(1, C.primary if active else C.border),
+                                on_click=lambda e, c=code, s_i=si, p_i=pi: toggle_allergen(c, s_i, p_i),
+                                ink=True,
+                            )
+                        )
+                    product_controls.append(
+                        card(
+                            ft.Column(
+                                [
+                                    make_photo_row(
+                                        prod.get("image_file_id"),
+                                        self._("product_photo"),
+                                        lambda fid, s_i=si, p_i=pi: draft["sections"][s_i]["products"][p_i].__setitem__(
+                                            "image_file_id", fid
+                                        ),
+                                        lambda s_i=si, p_i=pi: draft["sections"][s_i]["products"][p_i].__setitem__(
+                                            "image_file_id", None
+                                        ),
+                                        section_jobs,
+                                        size=72,
+                                    ),
+                                    pname,
+                                    pprice,
+                                    pdesc,
+                                    ft.Row(
+                                        [
+                                            ft.Text(self._("visible"), size=12, color=C.text_muted, expand=True),
+                                            ft.Switch(
+                                                value=bool(prod.get("visible", True)),
+                                                active_color=C.primary,
+                                                on_change=lambda e, s_i=si, p_i=pi: draft["sections"][s_i][
+                                                    "products"
+                                                ][p_i].__setitem__("visible", bool(e.control.value)),
+                                            ),
+                                        ],
+                                        spacing=6,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    ),
+                                    muted(self._("allergens")),
+                                    ft.Row(allergen_chips, spacing=6, wrap=True),
+                                    ft.OutlinedButton(
+                                        content=self._("delete_product"),
+                                        icon=ft.Icons.DELETE_OUTLINE,
+                                        on_click=lambda e, s_i=si, p_i=pi: (
+                                            draft["sections"][s_i]["products"].pop(p_i),
+                                            rebuild_sections(),
+                                            hydrate_editor_photos(),
+                                        ),
+                                        style=ft.ButtonStyle(
+                                            color=C.danger,
+                                            side=ft.BorderSide(1, C.danger),
+                                            padding=12,
+                                            shape=ft.RoundedRectangleBorder(radius=12),
+                                        ),
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                            padding=10,
+                        )
+                    )
+
+                sname = ft.TextField(
+                    label=self._("section_name"),
+                    value=sec.get("name") or "",
+                    border_radius=12,
+                    bgcolor=C.surface_alt,
+                    border_color=C.border,
+                    focused_border_color=C.primary,
+                    color=C.text,
+                    expand=True,
+                    on_change=lambda e, s_i=si: draft["sections"][s_i].__setitem__("name", e.control.value or ""),
+                )
+                controls.append(
+                    card(
+                        ft.Column(
+                            [
+                                sname,
+                                ft.Row(
+                                    [
+                                        ft.Text(self._("visible"), size=13, color=C.text, expand=True),
+                                        ft.Switch(
+                                            value=bool(sec.get("visible", True)),
+                                            active_color=C.primary,
+                                            tooltip=self._("visible"),
+                                            on_change=lambda e, s_i=si: draft["sections"][s_i].__setitem__(
+                                                "visible", bool(e.control.value)
+                                            ),
+                                        ),
+                                    ],
+                                    spacing=6,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                ft.OutlinedButton(
+                                    content=self._("delete_section"),
+                                    icon=ft.Icons.DELETE_FOREVER_OUTLINED,
+                                    on_click=lambda e, s_i=si: (
+                                        draft["sections"].pop(s_i),
+                                        rebuild_sections(),
+                                    ),
+                                    style=ft.ButtonStyle(
+                                        color="#EF4444",
+                                        side=ft.BorderSide(1, "#EF4444"),
+                                        padding=12,
+                                        shape=ft.RoundedRectangleBorder(radius=12),
+                                    ),
+                                ),
+                                *product_controls,
+                                ghost_button(
+                                    self._("add_product"),
+                                    lambda e, s_i=si: (
+                                        draft["sections"][s_i].setdefault("products", []).append(empty_product()),
+                                        rebuild_sections(),
+                                    ),
+                                    ft.Icons.ADD,
+                                ),
+                            ],
+                            spacing=8,
+                        ),
+                        padding=12,
+                    )
+                )
+            sections_host.controls = controls
+            try:
+                sections_host.update()
+            except Exception:
+                pass
+
+        def pick_colors(primary: str, secondary: str):
+            draft["primary_color"] = primary
+            draft["secondary_color"] = secondary
+            rebuild_color_row()
+
+        color_row = ft.Row(spacing=8, wrap=True)
+
+        def rebuild_color_row():
+            swatches = []
+            for primary, secondary in COLOR_PRESETS:
+                active = draft.get("primary_color") == primary and draft.get("secondary_color") == secondary
+                swatches.append(
+                    ft.Container(
+                        width=36,
+                        height=36,
+                        bgcolor=primary,
+                        border_radius=10,
+                        border=ft.Border.all(3, secondary if active else C.border),
+                        on_click=lambda e, p=primary, sec=secondary: pick_colors(p, sec),
+                        ink=True,
+                    )
+                )
+            color_row.controls = swatches
+            try:
+                color_row.update()
+            except Exception:
+                pass
+
+        rebuild_color_row()
+        rebuild_photos()
+        rebuild_sections()
+        hydrate_editor_photos()
+
+        async def fill_gps(_e=None):
+            coords = await self._capture_gps()
+            if not coords:
+                return
+            lat, lng = coords
+            lat_field.value = f"{lat:.6f}"
+            lng_field.value = f"{lng:.6f}"
+            maps_field.value = maps_href(lat=lat, lng=lng, address=address_field.value or "")
+            draft["lat"] = lat
+            draft["lng"] = lng
+            draft["maps_url"] = maps_field.value
+            try:
+                lat_field.update()
+                lng_field.update()
+                maps_field.update()
+            except Exception:
+                self.page.update()
+            self.toast(self._("gps_ok"))
+
+        async def save_menu(_e=None):
+            if not sid:
+                return
+            sync_draft_from_fields()
+            try:
+                storage = await asyncio.to_thread(self.api.update_menu_data, sid, draft)
+                self.current_storage = storage
+                self.offline.upsert_home_storage(storage)
+                self.toast(self._("menu_saved"))
+                self.go_menu()
+            except ApiError as err:
+                self.toast(err.message, error=True)
+            except Exception as err:
+                self.toast(str(err), error=True)
+
+        body = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+                        ft.Text(self._("menu_editor_title"), size=18, weight=ft.FontWeight.BOLD, color=C.text, expand=True),
+                        primary_button(self._("save_menu"), lambda e: self.page.run_task(save_menu), ft.Icons.SAVE, expand=False),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                name_field,
+                desc_field,
+                currency_dd,
+                photos_host,
+                section_title(self._("contact_title")),
+                address_field,
+                phone_field,
+                whatsapp_field,
+                email_field,
+                section_title(self._("contact_hours")),
+                ft.Text(self._("hours_from"), size=12, color=C.text_muted),
+                ft.Row([open_h, open_m, open_ampm], spacing=8),
+                ft.Text(self._("hours_to"), size=12, color=C.text_muted),
+                ft.Row([close_h, close_m, close_ampm], spacing=8),
+                section_title(self._("open_maps")),
+                lat_field,
+                lng_field,
+                ghost_button(
+                    self._("use_gps"),
+                    lambda e: self.page.run_task(fill_gps),
+                    ft.Icons.MY_LOCATION,
+                ),
+                maps_field,
+                section_title(self._("social_title")),
+                *social_fields.values(),
+                card(
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text(self._("public_vault"), weight=ft.FontWeight.W_700, color=C.text, size=13, expand=True),
+                                    self._info_button("public_vault_tip", "public_vault"),
+                                    ft.Switch(
+                                        value=bool(s.get("is_public")),
+                                        active_color=C.primary,
+                                        on_change=lambda e, st=sid: self.page.run_task(
+                                            self._toggle_public, st, bool(e.control.value)
+                                        ),
+                                    ),
+                                ],
+                                spacing=4,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            )
+                            if self._is_owner() and sid
+                            else ft.Container(),
+                            ft.Row(
+                                [
+                                    ft.Text(self._("digital_menu"), weight=ft.FontWeight.W_700, color=C.text, size=13, expand=True),
+                                    self._info_button("digital_menu_tip", "digital_menu"),
+                                    ft.Switch(
+                                        value=True,
+                                        active_color=C.primary,
+                                        on_change=lambda e, st=sid: self.page.run_task(
+                                            self._toggle_menu_kind, st, bool(e.control.value)
+                                        ),
+                                    ),
+                                ],
+                                spacing=4,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            )
+                            if self._is_owner() and sid
+                            else ft.Container(),
+                        ],
+                        spacing=4,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                )
+                if self._is_owner()
+                else ft.Container(),
+                section_title(self._("menu_colors")),
+                color_row,
+                ghost_button(
+                    self._("add_section"),
+                    lambda e: (draft.setdefault("sections", []).append(empty_section()), rebuild_sections()),
+                    ft.Icons.ADD_CIRCLE_OUTLINE,
+                ),
+                sections_host,
+            ],
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        self.set_view(body)
 
     async def _manual_sync(self, storage_id: int):
         await self._flush_offline_notes(silent=False)

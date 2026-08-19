@@ -266,6 +266,24 @@ class VaultAPI:
             )
             return self._handle(r)
 
+    def set_storage_kind(self, storage_id: int, kind: str) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.patch(
+                self._url(f"/api/storages/{storage_id}/"),
+                headers=self._headers(),
+                json={"kind": kind},
+            )
+            return self._handle(r)
+
+    def update_menu_data(self, storage_id: int, menu_data: dict) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.patch(
+                self._url(f"/api/storages/{storage_id}/"),
+                headers=self._headers(),
+                json={"menu_data": menu_data},
+            )
+            return self._handle(r)
+
     def update_storage_note(self, storage_id: int, note: str) -> dict:
         """Deprecated — use create_note / update_note."""
         with httpx.Client(timeout=30) as client:
