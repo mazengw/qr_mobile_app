@@ -122,6 +122,7 @@ def normalize_menu_data(raw: Any, *, restaurant_name: str = "", description: str
         "social": social,
         "primary_color": str(data.get("primary_color") or "#0D9488"),
         "secondary_color": str(data.get("secondary_color") or "#0F172A"),
+        "cart_enabled": bool(data.get("cart_enabled", True)),
         "sections": sections,
     }
 

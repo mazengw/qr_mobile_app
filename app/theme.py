@@ -63,11 +63,12 @@ def primary_button(text: str, on_click, icon=None, expand=True) -> ft.Control:
     )
 
 
-def ghost_button(text: str, on_click, icon=None) -> ft.Control:
+def ghost_button(text: str, on_click, icon=None, expand: bool = False) -> ft.Control:
     return ft.OutlinedButton(
         content=text,
         icon=icon,
         on_click=on_click,
+        expand=expand,
         style=ft.ButtonStyle(
             color=C.text,
             side=ft.BorderSide(1, C.border),

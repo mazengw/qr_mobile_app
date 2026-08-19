@@ -6,6 +6,7 @@ flet-geolocator>=0.86.0
 flet-webview>=0.86.0
 httpx>=0.27.0
 Pillow>=10.0.0
+qrcode>=7.4.2
 # On Android/iOS APK builds, Flet installs the mobile wheel from https://pypi.flet.dev
 pyzbar>=0.1.9
 # pypdfium2 is NOT listed here: no Android/iOS wheel on pypi.flet.dev, so

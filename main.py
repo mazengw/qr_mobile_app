@@ -6,6 +6,7 @@ Professional phone-first UI talking to the Django QR Vault APIs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import tempfile
 import time
 import webbrowser
@@ -14,6 +15,7 @@ from pathlib import Path
 import flet as ft
 import flet_video as ftv
 
+from app.cart import MenuCart, format_line_calc, format_order_text, order_qr_base64, parse_price_number
 from app.api import ApiError, VaultAPI
 from app.i18n import LANG_AR, LANG_EN, normalize_lang, t
 from app.menu_data import (
@@ -196,6 +198,7 @@ class QRVaultApp:
         self._menu_draft: dict | None = None
         self._menu_category_id: str | None = None
         self._geolocator = None
+        self.menu_cart = MenuCart()
 
         # FilePicker is a Service in Flet >=0.80 — do not add to page.overlay
         self.file_picker = ft.FilePicker()
@@ -2599,6 +2602,32 @@ class QRVaultApp:
                 return row.get("original_name") or f"menu_{file_id}.jpg"
         return f"menu_{file_id}.jpg"
 
+    def _menu_thumb_uri(self, src: str) -> str:
+        raw = (src or "").strip()
+        if not raw or raw.startswith(("http://", "https://", "data:")):
+            return raw
+        path = Path(raw)
+        if not path.is_file():
+            return raw.replace("\\", "/")
+        try:
+            ext = path.suffix.lower().lstrip(".") or "jpeg"
+            mime = "jpeg" if ext in ("jpg", "jpeg") else ext
+            data = path.read_bytes()
+            if len(data) <= 3_000_000:
+                b64 = base64.b64encode(data).decode("ascii")
+                return f"data:image/{mime};base64,{b64}"
+        except Exception:
+            pass
+        return path.resolve().as_posix()
+
+    def _menu_photo_image(self, src: str, width: int, height: int) -> ft.Image:
+        return ft.Image(
+            src=self._menu_thumb_uri(src),
+            width=int(width),
+            height=int(height),
+            fit=ft.BoxFit.COVER,
+        )
+
     def _menu_photo_box(
         self,
         file_id,
@@ -2609,22 +2638,59 @@ class QRVaultApp:
         fallback_icon=ft.Icons.FASTFOOD_OUTLINED,
     ) -> tuple[ft.Container, int | None]:
         fid = self._menu_file_id(file_id)
+        h = int(height or 88)
         cached = self._menu_image_cache.get(fid) if fid else None
+        if width is None:
+            if cached:
+                inner: ft.Control = ft.Image(
+                    src=self._menu_thumb_uri(str(cached)),
+                    height=h,
+                    fit=ft.BoxFit.COVER,
+                    expand=True,
+                )
+            else:
+                inner = ft.Icon(
+                    fallback_icon,
+                    size=min(34, max(18, h // 3)),
+                    color="#FFFFFF88",
+                )
+            box = ft.Container(
+                content=inner,
+                width=None,
+                height=h,
+                bgcolor="#0B1220",
+                border_radius=radius,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                alignment=ft.Alignment.CENTER,
+                padding=0,
+            )
+            return box, fid
+
+        thumb_w = int(width)
         if cached:
-            img_kwargs: dict = {"src": cached, "height": height, "fit": ft.BoxFit.COVER}
-            if width:
-                img_kwargs["width"] = width
-            content: ft.Control = ft.Image(**img_kwargs)
+            inner = self._menu_photo_image(str(cached), thumb_w, h)
         else:
-            content = ft.Icon(fallback_icon, size=min(34, max(18, height // 3)), color="#FFFFFF88")
+            inner = ft.Icon(
+                fallback_icon,
+                size=min(34, max(18, h // 3)),
+                color="#FFFFFF88",
+            )
+        shell = ft.Container(
+            content=inner,
+            width=thumb_w,
+            height=h,
+            alignment=ft.Alignment.CENTER,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            padding=0,
+        )
         box = ft.Container(
-            content=content,
-            width=width,
-            height=height,
+            content=shell,
+            width=thumb_w,
+            height=h,
             bgcolor="#0B1220",
             border_radius=radius,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            alignment=ft.Alignment.CENTER,
+            padding=0,
         )
         return box, fid
 
@@ -2641,12 +2707,24 @@ class QRVaultApp:
                     self._menu_image_cache[file_id] = src
                 except Exception:
                     continue
-            w = box.width
             h = int(box.height or 88)
-            img_kwargs: dict = {"src": src, "height": h, "fit": ft.BoxFit.COVER}
-            if w:
-                img_kwargs["width"] = int(w)
-            box.content = ft.Image(**img_kwargs)
+            box.image = None
+            if box.width is None:
+                box.content = ft.Image(
+                    src=self._menu_thumb_uri(src),
+                    height=h,
+                    fit=ft.BoxFit.COVER,
+                    expand=True,
+                )
+            else:
+                thumb_w = int(box.width)
+                box.content = ft.Container(
+                    content=self._menu_photo_image(src, thumb_w, h),
+                    width=thumb_w,
+                    height=h,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                    padding=0,
+                )
             try:
                 box.update()
             except Exception:
@@ -2900,14 +2978,628 @@ class QRVaultApp:
             restaurant_name=s.get("title") or "",
         )
 
+    def _menu_cart_enabled(self, menu: dict | None = None) -> bool:
+        data = menu if menu is not None else self._menu_payload()
+        return bool(data.get("cart_enabled", True))
+
+    def _menu_product_meta(self, prod: dict, section_name: str, *, currency: str) -> dict:
+        price_raw = str(prod.get("price") or "").strip()
+        return {
+            "name": (prod.get("name") or "").strip() or "—",
+            "price": price_raw,
+            "price_display": format_menu_price(price_raw, currency) if price_raw else "",
+            "section": (section_name or "").strip() or "—",
+        }
+
+    def _menu_qty_controls(
+        self,
+        qty_ref: dict,
+        on_change,
+        *,
+        primary: str,
+        compact: bool = False,
+        min_qty: int = 0,
+    ) -> ft.Row:
+        size = 34 if compact else 40
+        qty_label = ft.Text(str(qty_ref.get("value", 1)), size=16, weight=ft.FontWeight.W_800, color=C.text)
+
+        def refresh():
+            qty_label.value = str(qty_ref.get("value", 1))
+            try:
+                qty_label.update()
+            except Exception:
+                pass
+
+        def bump(delta: int):
+            qty_ref["value"] = max(min_qty, min(99, int(qty_ref.get("value", 1)) + delta))
+            on_change(qty_ref["value"])
+            refresh()
+
+        minus_color = C.text_muted if qty_ref.get("value", 1) <= min_qty else primary
+        return ft.Row(
+            [
+                ft.Container(
+                    content=ft.Icon(ft.Icons.REMOVE, size=18, color=minus_color),
+                    width=size,
+                    height=size,
+                    border_radius=size // 2,
+                    border=ft.Border.all(1, C.border),
+                    alignment=ft.Alignment.CENTER,
+                    ink=True,
+                    on_click=lambda e: bump(-1),
+                ),
+                ft.Container(content=qty_label, width=42, alignment=ft.Alignment.CENTER),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.ADD, size=18, color="#0B1220"),
+                    width=size,
+                    height=size,
+                    border_radius=size // 2,
+                    bgcolor=primary,
+                    alignment=ft.Alignment.CENTER,
+                    ink=True,
+                    on_click=lambda e: bump(1),
+                ),
+            ],
+            spacing=8,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+
+    def _cart_note_field(
+        self,
+        label: str,
+        value: str,
+        hint: str,
+        on_change,
+    ) -> ft.TextField:
+        return ft.TextField(
+            label=label,
+            hint_text=hint,
+            value=value or "",
+            border_radius=12,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+            multiline=True,
+            min_lines=1,
+            max_lines=3,
+            text_size=13,
+            on_change=on_change,
+        )
+
+    def _format_cart_line_calc(self, line: dict, currency: str) -> str:
+        qty = int(line.get("qty") or 0)
+        line_total = parse_price_number(line.get("price")) * qty
+        line_total_txt = format_menu_price(f"{line_total:g}" if line_total else "0", currency)
+        return format_line_calc(line, formatted_total=line_total_txt)
+
+    def _show_cart_item_note_dialog(self, product_id: str, current_note: str, *, primary: str):
+        note_field = self._cart_note_field(
+            self._("cart_item_note"),
+            current_note,
+            self._("cart_item_note_hint"),
+            lambda e: None,
+        )
+
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        def save(_e=None):
+            self.menu_cart.set_item_note(product_id, note_field.value or "")
+            self.page.pop_dialog()
+            self.go_menu_cart()
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                bgcolor=C.surface,
+                title=ft.Text(self._("cart_edit_note" if current_note else "cart_add_note"), color=C.text, weight=ft.FontWeight.W_700),
+                content=note_field,
+                content_padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                actions=[
+                    ft.TextButton(content=self._("cancel"), on_click=close),
+                    ft.Button(content=self._("save_menu"), on_click=save, bgcolor=primary, color="#0B1220"),
+                ],
+                actions_padding=ft.Padding.only(left=12, right=12, bottom=12, top=0),
+            )
+        )
+
+    def _show_cart_order_note_dialog(self, current_note: str, *, primary: str):
+        note_field = self._cart_note_field(
+            self._("cart_order_note"),
+            current_note,
+            self._("cart_order_note_hint"),
+            lambda e: None,
+        )
+
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        def save(_e=None):
+            self.menu_cart.set_order_note(note_field.value or "")
+            self.page.pop_dialog()
+            self.go_menu_cart()
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                bgcolor=C.surface,
+                title=ft.Text(
+                    self._("cart_edit_order_note" if current_note else "cart_add_order_note"),
+                    color=C.text,
+                    weight=ft.FontWeight.W_700,
+                ),
+                content=note_field,
+                content_padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                actions=[
+                    ft.TextButton(content=self._("cancel"), on_click=close),
+                    ft.Button(content=self._("save_menu"), on_click=save, bgcolor=primary, color="#0B1220"),
+                ],
+                actions_padding=ft.Padding.only(left=12, right=12, bottom=12, top=0),
+            )
+        )
+
+    def _show_menu_item_sheet(self, prod: dict, section_name: str, *, primary: str, currency: str):
+        if not self._menu_cart_enabled():
+            return
+        pid = str(prod.get("id") or "")
+        if not pid:
+            return
+        meta = self._menu_product_meta(prod, section_name, currency=currency)
+        in_cart = self.menu_cart.get_qty(pid)
+        qty_ref = {"value": in_cart if in_cart else 1}
+        price_text = meta["price_display"] or self._("no_price")
+        name = meta["name"]
+        existing_note = self.menu_cart.get_item_note(pid) if in_cart else ""
+        note_visible = {"open": bool(existing_note)}
+        note_field = self._cart_note_field(
+            self._("cart_item_note"),
+            existing_note,
+            self._("cart_item_note_hint"),
+            lambda e: None,
+        )
+        note_field.visible = note_visible["open"]
+
+        def toggle_note(_e=None):
+            note_visible["open"] = not note_visible["open"]
+            note_field.visible = note_visible["open"]
+            try:
+                note_field.update()
+                note_toggle.update()
+            except Exception:
+                pass
+
+        note_toggle = ft.TextButton(
+            content=self._("cart_edit_note") if existing_note else self._("cart_add_note"),
+            icon=ft.Icons.NOTE_ALT_OUTLINED,
+            on_click=toggle_note,
+        )
+
+        def set_qty(v: int):
+            qty_ref["value"] = max(1, min(99, v))
+
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        def confirm(_e=None):
+            meta["note"] = (note_field.value or "").strip() if note_visible["open"] or note_field.value else ""
+            self.menu_cart.set_qty(pid, qty_ref["value"], meta=meta)
+            self.page.pop_dialog()
+            self.toast(self._("cart_added"))
+            self.go_menu()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.surface,
+            title=ft.Text(name, color=C.text, weight=ft.FontWeight.W_700, size=17),
+            content=ft.Column(
+                [
+                    ft.Text(price_text, color=primary, size=15, weight=ft.FontWeight.W_700),
+                    muted(self._("cart_select_qty"), size=12),
+                    self._menu_qty_controls(qty_ref, set_qty, primary=primary, min_qty=1),
+                    note_toggle,
+                    note_field,
+                    ft.Text(
+                        self._("cart_in_cart", n=in_cart),
+                        color=C.text_muted,
+                        size=11,
+                        visible=in_cart > 0,
+                    ),
+                ],
+                spacing=8,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            content_padding=ft.Padding.symmetric(horizontal=20, vertical=8),
+            actions=[
+                ft.TextButton(content=self._("cancel"), on_click=close),
+                ft.Button(
+                    content=self._("cart_update") if in_cart else self._("cart_add"),
+                    on_click=confirm,
+                    bgcolor=primary,
+                    color="#0B1220",
+                ),
+            ],
+            actions_padding=ft.Padding.only(left=12, right=12, bottom=12, top=0),
+        )
+        self.page.show_dialog(dialog)
+
+    def _menu_cart_summary_bar(self, *, primary: str, currency: str) -> ft.Control:
+        if self.menu_cart.is_empty():
+            return ft.Container()
+        count = self.menu_cart.count()
+        total_num = self.menu_cart.total_numeric()
+        total_txt = format_menu_price(f"{total_num:g}" if total_num else "0", currency)
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Column(
+                        [
+                            ft.Text(
+                                self._("cart_items", n=count),
+                                color=C.text,
+                                size=14,
+                                weight=ft.FontWeight.W_700,
+                            ),
+                            ft.Text(total_txt, color=primary, size=13, weight=ft.FontWeight.W_600),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.Button(
+                        content=ft.Row(
+                            [
+                                ft.Icon(ft.Icons.SHOPPING_CART_CHECKOUT, size=18, color="#0B1220"),
+                                ft.Text(self._("view_cart"), color="#0B1220", weight=ft.FontWeight.W_700),
+                            ],
+                            spacing=6,
+                            tight=True,
+                        ),
+                        bgcolor=primary,
+                        on_click=lambda e: self.go_menu_cart(),
+                        style=ft.ButtonStyle(
+                            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                            shape=ft.RoundedRectangleBorder(radius=14),
+                        ),
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.surface,
+            border=ft.Border.all(1, C.border),
+            border_radius=18,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=12),
+            shadow=ft.BoxShadow(blur_radius=16, color="#00000055", offset=ft.Offset(0, -2)),
+        )
+
+    def _menu_cart_icon_button(self, *, primary: str) -> ft.IconButton:
+        count = self.menu_cart.count()
+        btn = ft.IconButton(
+            icon=ft.Icons.SHOPPING_CART_OUTLINED,
+            icon_color=primary,
+            tooltip=self._("view_cart"),
+            on_click=lambda e: self.go_menu_cart(),
+        )
+        if count > 0:
+            btn.badge = ft.Badge(
+                label=str(count),
+                bgcolor=primary,
+                text_color="#0B1220",
+                large_size=18,
+                padding=ft.Padding.symmetric(horizontal=5, vertical=2),
+                offset=ft.Offset(4, 6),
+            )
+        return btn
+
+    def _format_cart_total(self, currency: str) -> str:
+        total = self.menu_cart.total_numeric()
+        if total <= 0:
+            return format_menu_price("0", currency)
+        text = f"{total:g}" if total == int(total) else f"{total:.2f}"
+        return format_menu_price(text, currency)
+
+    def _build_order_qr_text(self, *, restaurant: str, currency: str) -> str:
+        items = []
+        for line in self.menu_cart.lines():
+            line_total = parse_price_number(line.get("price")) * int(line.get("qty") or 0)
+            line_total_txt = format_menu_price(f"{line_total:g}" if line_total else "0", currency)
+            items.append(
+                {
+                    **line,
+                    "price_display": line.get("price_display")
+                    or format_menu_price(line.get("price") or "", currency),
+                    "line_total_display": line_total_txt,
+                }
+            )
+        return format_order_text(
+            restaurant=restaurant,
+            items=items,
+            total_label=self._("cart_total"),
+            formatted_total=self._format_cart_total(currency),
+            order_note=self.menu_cart.get_order_note(),
+            item_note_label=self._("cart_note_label"),
+            order_note_label=self._("cart_order_note"),
+        )
+
+    def _show_order_qr_dialog(self, *, restaurant: str, currency: str, primary: str):
+        if self.menu_cart.is_empty():
+            self.toast(self._("cart_empty"), error=True)
+            return
+        order_text = self._build_order_qr_text(restaurant=restaurant, currency=currency)
+        try:
+            qr_b64 = order_qr_base64(order_text)
+        except Exception as exc:
+            self.toast(str(exc), error=True)
+            return
+
+        def close(_e=None):
+            self.page.pop_dialog()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.surface,
+            title=ft.Text(self._("cart_qr_title"), color=C.text, weight=ft.FontWeight.W_700),
+            content=ft.Container(
+                width=min(340, self.page.width or 340),
+                content=ft.Column(
+                    [
+                        ft.Container(
+                            content=ft.Image(
+                                src=f"data:image/png;base64,{qr_b64}",
+                                width=260,
+                                height=260,
+                                fit=ft.BoxFit.CONTAIN,
+                            ),
+                            bgcolor="#FFFFFF",
+                            border_radius=16,
+                            padding=12,
+                            alignment=ft.Alignment.CENTER,
+                        ),
+                        muted(self._("cart_qr_hint")),
+                        ft.Container(
+                            content=ft.Text(
+                                order_text,
+                                color=C.text,
+                                size=12,
+                                selectable=True,
+                                font_family="Courier New",
+                                text_align=ft.TextAlign.LEFT,
+                            ),
+                            bgcolor=C.surface_alt,
+                            border_radius=12,
+                            padding=12,
+                            border=ft.Border.all(1, C.border),
+                            width=min(300, self.page.width or 300),
+                        ),
+                    ],
+                    spacing=12,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                height=min(520, (self.page.height or 600) * 0.75),
+            ),
+            actions=[
+                ft.Button(content=self._("got_it"), on_click=close, bgcolor=primary, color="#0B1220"),
+            ],
+        )
+        self.page.show_dialog(dialog)
+
+    def go_menu_cart(self):
+        """Review cart, adjust quantities, show order QR for staff."""
+        if not self._menu_cart_enabled():
+            self.go_menu()
+            return
+        self._set_back(self.go_menu)
+        s = self.current_storage or {}
+        menu = self._menu_payload()
+        primary = menu.get("primary_color") or C.primary
+        currency = menu.get("currency") or "SYP"
+        restaurant = menu.get("restaurant_name") or s.get("title") or self._("menu_badge")
+        self.menu_cart.bind_storage(s.get("id"))
+
+        if self.menu_cart.is_empty():
+            body = ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+                            ft.Text(self._("cart_title"), size=18, weight=ft.FontWeight.BOLD, color=C.text, expand=True),
+                        ],
+                    ),
+                    ft.Container(expand=True),
+                    ft.Column(
+                        [
+                            ft.Icon(ft.Icons.SHOPPING_CART_OUTLINED, size=56, color=primary),
+                            ft.Text(self._("cart_empty"), color=C.text_muted, text_align=ft.TextAlign.CENTER),
+                            primary_button(
+                                self._("cart_back_menu"),
+                                lambda e: self.go_menu(),
+                                ft.Icons.RESTAURANT_MENU,
+                                expand=False,
+                            ),
+                        ],
+                        spacing=14,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Container(expand=True),
+                ],
+                expand=True,
+            )
+            self.set_view(body)
+            return
+
+        line_cards: list[ft.Control] = []
+        for line in self.menu_cart.lines():
+            pid = str(line.get("product_id") or "")
+            name = line.get("name") or "—"
+            qty = int(line.get("qty") or 0)
+            calc_txt = self._format_cart_line_calc(line, currency)
+            item_note = (line.get("note") or "").strip()
+
+            def on_qty_change(v: int, product_id=pid):
+                self.menu_cart.set_qty(product_id, v)
+                self.go_menu_cart()
+
+            qty_ref = {"value": qty}
+            line_cards.append(
+                card(
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        name,
+                                        color=C.text,
+                                        weight=ft.FontWeight.W_700,
+                                        size=14,
+                                        expand=True,
+                                        max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                    ),
+                                    ft.Text(calc_txt, color=primary, size=13, weight=ft.FontWeight.W_800),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Text(
+                                f"↳ {item_note}",
+                                color=C.text_muted,
+                                size=11,
+                                max_lines=2,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                                visible=bool(item_note),
+                            ),
+                            ft.Row(
+                                [
+                                    self._menu_qty_controls(
+                                        qty_ref,
+                                        on_qty_change,
+                                        primary=primary,
+                                        compact=True,
+                                        min_qty=0,
+                                    ),
+                                    ft.TextButton(
+                                        content=self._("cart_edit_note") if item_note else self._("cart_add_note"),
+                                        icon=ft.Icons.NOTE_ALT_OUTLINED,
+                                        on_click=lambda e, p=pid, n=item_note: self._show_cart_item_note_dialog(
+                                            p, n, primary=primary
+                                        ),
+                                    ),
+                                    ft.IconButton(
+                                        ft.Icons.DELETE_OUTLINE,
+                                        icon_color=C.danger,
+                                        icon_size=20,
+                                        tooltip=self._("cart_remove"),
+                                        on_click=lambda e, p=pid: (self.menu_cart.set_qty(p, 0), self.go_menu_cart()),
+                                    ),
+                                ],
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ],
+                        spacing=6,
+                        tight=True,
+                    ),
+                    padding=10,
+                )
+            )
+
+        total_txt = self._format_cart_total(currency)
+        order_note = self.menu_cart.get_order_note()
+        order_note_row = card(
+            ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.TextButton(
+                                content=self._("cart_edit_order_note") if order_note else self._("cart_add_order_note"),
+                                icon=ft.Icons.NOTE_ALT_OUTLINED,
+                                on_click=lambda e: self._show_cart_order_note_dialog(order_note, primary=primary),
+                            ),
+                        ],
+                    ),
+                    ft.Text(
+                        f"↳ {order_note}",
+                        color=C.text_muted,
+                        size=12,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        visible=bool(order_note),
+                    ),
+                ],
+                spacing=4,
+                tight=True,
+            ),
+            padding=10,
+        )
+
+        body = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+                        ft.Column(
+                            [
+                                ft.Text(self._("cart_title"), size=18, weight=ft.FontWeight.BOLD, color=C.text),
+                                muted(restaurant),
+                            ],
+                            spacing=0,
+                            expand=True,
+                        ),
+                        ft.IconButton(
+                            ft.Icons.DELETE_OUTLINE,
+                            icon_color=C.danger,
+                            tooltip=self._("cart_clear"),
+                            on_click=lambda e: (self.menu_cart.clear(), self.toast(self._("cart_cleared")), self.go_menu_cart()),
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Column(line_cards, spacing=8, expand=True, scroll=ft.ScrollMode.AUTO),
+                order_note_row,
+                card(
+                    ft.Row(
+                        [
+                            ft.Text(self._("cart_total"), color=C.text, size=16, weight=ft.FontWeight.W_700, expand=True),
+                            ft.Text(total_txt, color=primary, size=20, weight=ft.FontWeight.BOLD),
+                        ],
+                    ),
+                    padding=14,
+                ),
+                ft.Row(
+                    [
+                        ghost_button(
+                            self._("cart_back_menu"),
+                            lambda e: self.go_menu(),
+                            ft.Icons.RESTAURANT_MENU,
+                            expand=True,
+                        ),
+                        primary_button(
+                            self._("cart_show_qr"),
+                            lambda e: self._show_order_qr_dialog(
+                                restaurant=restaurant, currency=currency, primary=primary
+                            ),
+                            ft.Icons.QR_CODE_2,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                ),
+            ],
+            spacing=12,
+            expand=True,
+        )
+        self.set_view(body)
+
     def go_menu(self):
         """Public restaurant menu view for digital menu storages."""
         self._set_back(self.go_home)
         s = self.current_storage or {}
         sid = s.get("id")
+        self.menu_cart.bind_storage(sid)
         menu = self._menu_payload()
         primary = menu.get("primary_color") or C.primary
         can_write = self._can_write()
+        cart_enabled = self._menu_cart_enabled(menu)
         image_jobs: list[tuple[int, ft.Container]] = []
 
         restaurant = menu.get("restaurant_name") or s.get("title") or self._("menu_badge")
@@ -3212,49 +3904,88 @@ class QRVaultApp:
                     image_jobs.append((photo_id, photo))
                 price = format_menu_price(prod.get("price") or "", currency) or self._("no_price")
                 desc = (prod.get("description") or "").strip()
-                product_cards.append(
+                pid = str(prod.get("id") or "")
+                sec_name = sec.get("name") or "Section"
+                cart_qty = self.menu_cart.get_qty(pid) if (pid and cart_enabled) else 0
+                price_row = (
                     ft.Container(
-                        content=ft.Column(
+                        content=ft.Row(
                             [
-                                photo,
                                 ft.Text(
-                                    prod.get("name") or "—",
+                                    price,
+                                    color="#0B1220",
                                     weight=ft.FontWeight.W_800,
-                                    color=C.text,
-                                    size=13,
-                                    max_lines=2,
+                                    size=12,
+                                    expand=True,
                                 ),
-                                ft.Text(desc, color=C.text_muted, size=11, max_lines=2)
-                                if desc
-                                else ft.Container(),
-                                allergen_row(prod.get("allergens") or []),
-                                ft.Container(
-                                    content=ft.Text(
-                                        price,
-                                        color="#0B1220",
-                                        weight=ft.FontWeight.W_800,
-                                        size=12,
-                                    ),
-                                    bgcolor=primary,
-                                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
-                                    border_radius=10,
-                                    alignment=ft.Alignment.CENTER,
+                                ft.Icon(
+                                    ft.Icons.ADD_CIRCLE_OUTLINE,
+                                    size=20,
+                                    color=primary,
                                 ),
                             ],
-                            spacing=6,
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
-                        bgcolor=C.surface,
-                        border=ft.Border.all(1, C.border),
-                        border_radius=18,
-                        padding=8,
-                        shadow=ft.BoxShadow(
-                            blur_radius=12,
-                            color="#00000040",
-                            offset=ft.Offset(0, 4),
-                        ),
-                        expand=True,
+                        bgcolor=primary if cart_qty <= 0 else C.surface_alt,
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                        border_radius=10,
+                        border=ft.Border.all(1, primary if cart_qty > 0 else primary),
                     )
+                    if cart_enabled
+                    else ft.Text(price, color=primary, weight=ft.FontWeight.W_800, size=12)
                 )
+                product_body = ft.Column(
+                    [
+                        photo,
+                        ft.Text(
+                            prod.get("name") or "—",
+                            weight=ft.FontWeight.W_800,
+                            color=C.text,
+                            size=13,
+                            max_lines=2,
+                        ),
+                        ft.Text(desc, color=C.text_muted, size=11, max_lines=2)
+                        if desc
+                        else ft.Container(),
+                        allergen_row(prod.get("allergens") or []),
+                        price_row,
+                    ],
+                    spacing=6,
+                )
+                cart_badge = (
+                    ft.Container(
+                        content=ft.Text(str(cart_qty), size=10, weight=ft.FontWeight.W_800, color="#0B1220"),
+                        bgcolor=primary,
+                        padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+                        border_radius=999,
+                        right=6,
+                        top=6,
+                    )
+                    if cart_qty > 0
+                    else ft.Container()
+                )
+                card_content: ft.Control = (
+                    ft.Stack([product_body, cart_badge]) if cart_enabled else product_body
+                )
+                card_kwargs: dict = {
+                    "content": card_content,
+                    "bgcolor": C.surface,
+                    "border": ft.Border.all(1, primary if cart_qty > 0 else C.border),
+                    "border_radius": 18,
+                    "padding": 8,
+                    "shadow": ft.BoxShadow(
+                        blur_radius=12,
+                        color="#00000040",
+                        offset=ft.Offset(0, 4),
+                    ),
+                    "expand": True,
+                }
+                if cart_enabled:
+                    card_kwargs["ink"] = True
+                    card_kwargs["on_click"] = lambda e, p=prod, sn=sec_name: self._show_menu_item_sheet(
+                        p, sn, primary=primary, currency=currency
+                    )
+                product_cards.append(ft.Container(**card_kwargs))
             grid_rows: list[ft.Control] = []
             for i in range(0, len(product_cards), 2):
                 left = product_cards[i]
@@ -3295,26 +4026,28 @@ class QRVaultApp:
                 )
             )
 
-        header_actions: list[ft.Control] = []
+        header_icon_rows: list[ft.Control] = []
         if can_write:
-            header_actions.append(
+            header_icon_rows.append(
                 ft.IconButton(
                     icon=ft.Icons.EDIT_NOTE,
-                    icon_color=primary,
+                    icon_color=primary if self._is_owner() else C.text_muted,
                     tooltip=self._("customize_menu"),
                     on_click=lambda e: self.go_menu_editor(),
                 )
             )
-        if self._is_owner():
-            header_actions.append(
+        if self._can_manage():
+            header_icon_rows.append(
                 ft.IconButton(
-                    icon=ft.Icons.SETTINGS_OUTLINED,
+                    icon=ft.Icons.PERSON_ADD_ALT,
                     icon_color=C.text_muted,
-                    tooltip=self._("menu_manage"),
-                    on_click=lambda e: self.go_menu_editor(),
+                    tooltip=self._("menu_manage_editors"),
+                    on_click=lambda e: self.go_share(menu_mode=True),
                 )
             )
-        header_actions.append(
+        if cart_enabled:
+            header_icon_rows.append(self._menu_cart_icon_button(primary=primary))
+        header_icon_rows.append(
             ft.IconButton(
                 icon=ft.Icons.HELP_OUTLINE,
                 icon_color=C.text_muted,
@@ -3322,23 +4055,34 @@ class QRVaultApp:
                 on_click=lambda e: self._show_help(),
             )
         )
+        header_icons = ft.Row(
+            header_icon_rows,
+            spacing=0,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
-        body = ft.Column(
+        currency_code = menu.get("currency") or "SYP"
+        scroll_body = ft.Column(
             [
-                ft.Row(
-                    [
-                        ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
-                        ft.Column(
-                            [
-                                ft.Text(restaurant, size=16, weight=ft.FontWeight.BOLD, color=C.text),
-                                muted(self._("menu_badge") if can_write else self._("our_menu")),
-                            ],
-                            spacing=0,
-                            expand=True,
-                        ),
-                        *header_actions,
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+                            ft.Column(
+                                [
+                                    ft.Text(restaurant, size=16, weight=ft.FontWeight.BOLD, color=C.text),
+                                    muted(self._("menu_badge") if can_write else self._("our_menu")),
+                                ],
+                                spacing=0,
+                                expand=True,
+                            ),
+                            header_icons,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    clip_behavior=ft.ClipBehavior.NONE,
+                    padding=ft.Padding.only(top=6),
                 ),
                 hero,
                 gallery_row,
@@ -3353,6 +4097,10 @@ class QRVaultApp:
             expand=True,
             scroll=ft.ScrollMode.AUTO,
         )
+        body_parts: list[ft.Control] = [scroll_body]
+        if cart_enabled and self.menu_cart.count() > 0:
+            body_parts.append(self._menu_cart_summary_bar(primary=primary, currency=currency_code))
+        body = ft.Column(body_parts, spacing=10, expand=True)
         self.set_view(body)
         if sid and image_jobs:
             self.page.run_task(self._hydrate_menu_images, sid, image_jobs)
@@ -3465,6 +4213,7 @@ class QRVaultApp:
             draft["cover_file_id"] = gallery[0] if gallery else cover
 
         def make_photo_row(file_id, label: str, on_set, on_clear, jobs: list, *, circle: bool = False, size: int = 72) -> ft.Control:
+            size = int(size)
             box, fid = self._menu_photo_box(
                 file_id,
                 width=size,
@@ -3474,6 +4223,12 @@ class QRVaultApp:
             )
             if fid:
                 jobs.append((fid, box))
+            thumb = ft.Container(
+                width=size,
+                height=size,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                content=box,
+            )
 
             async def pick(_e=None):
                 uploaded = await self._upload_menu_photo()
@@ -3492,7 +4247,7 @@ class QRVaultApp:
 
             return ft.Row(
                 [
-                    box,
+                    thumb,
                     ft.Column(
                         [
                             ft.Text(label, size=12, weight=ft.FontWeight.W_600, color=C.text),
@@ -3511,16 +4266,18 @@ class QRVaultApp:
                                         on_click=clear,
                                     ),
                                 ],
-                                spacing=4,
-                                wrap=True,
+                                # spacing=4,
+                                # wrap=True,
                             ),
                         ],
-                        spacing=2,
-                        expand=True,
+                        # spacing=2,
+                        # expand=True,
                     ),
                 ],
                 spacing=10,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+                wrap=False,
             )
 
         def rebuild_photos():
@@ -3557,22 +4314,27 @@ class QRVaultApp:
                 thumbs.append(
                     ft.Column(
                         [
-                            ft.Stack(
-                                [
-                                    box,
-                                    ft.Container(
-                                        content=ft.Icon(ft.Icons.CLOSE, size=14, color="#FFFFFF"),
-                                        bgcolor="#E11D48",
-                                        width=22,
-                                        height=22,
-                                        border_radius=11,
-                                        alignment=ft.Alignment.CENTER,
-                                        right=4,
-                                        top=4,
-                                        ink=True,
-                                        on_click=remove_gallery,
-                                    ),
-                                ]
+                            ft.Container(
+                                width=84,
+                                height=84,
+                                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                                content=ft.Stack(
+                                    [
+                                        box,
+                                        ft.Container(
+                                            content=ft.Icon(ft.Icons.CLOSE, size=14, color="#FFFFFF"),
+                                            bgcolor="#E11D48",
+                                            width=22,
+                                            height=22,
+                                            border_radius=11,
+                                            alignment=ft.Alignment.CENTER,
+                                            right=4,
+                                            top=4,
+                                            ink=True,
+                                            on_click=remove_gallery,
+                                        ),
+                                    ]
+                                ),
                             ),
                             ft.TextButton(
                                 self._("set_as_cover"),
@@ -3790,7 +4552,7 @@ class QRVaultApp:
                                 ],
                                 spacing=8,
                             ),
-                            padding=10,
+                            padding=1,
                         )
                     )
 
@@ -3940,6 +4702,30 @@ class QRVaultApp:
                 name_field,
                 desc_field,
                 currency_dd,
+                card(
+                    ft.Row(
+                        [
+                            ft.Text(
+                                self._("menu_cart_enabled"),
+                                weight=ft.FontWeight.W_700,
+                                color=C.text,
+                                size=13,
+                                expand=True,
+                            ),
+                            self._info_button("menu_cart_enabled_tip", "menu_cart_enabled"),
+                            ft.Switch(
+                                value=bool(draft.get("cart_enabled", True)),
+                                active_color=C.primary,
+                                on_change=lambda e: draft.__setitem__(
+                                    "cart_enabled", bool(e.control.value)
+                                ),
+                            ),
+                        ],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                ),
                 photos_host,
                 section_title(self._("contact_title")),
                 address_field,
@@ -4005,6 +4791,28 @@ class QRVaultApp:
                     padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                 )
                 if self._is_owner()
+                else ft.Container(),
+                card(
+                    ft.Column(
+                        [
+                            ft.Text(
+                                self._("menu_edit_access"),
+                                weight=ft.FontWeight.W_700,
+                                color=C.text,
+                                size=13,
+                            ),
+                            muted(self._("menu_edit_access_hint"), size=12),
+                            ghost_button(
+                                self._("menu_manage_editors"),
+                                lambda e: self.go_share(menu_mode=True),
+                                ft.Icons.PERSON_ADD_ALT,
+                            ),
+                        ],
+                        spacing=8,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                )
+                if self._can_manage() and sid
                 else ft.Container(),
                 section_title(self._("menu_colors")),
                 color_row,
@@ -5963,12 +6771,28 @@ class QRVaultApp:
             self.toast(e.message, error=True)
 
     # ── Share ───────────────────────────────────────────────────
-    def go_share(self):
+    def _share_permission_options(self, menu_mode: bool) -> list[ft.dropdown.Option]:
+        if menu_mode:
+            return [
+                ft.dropdown.Option("write", self._("menu_perm_write")),
+                ft.dropdown.Option("manage", self._("menu_perm_manage")),
+            ]
+        return [
+            ft.dropdown.Option("read", "Read"),
+            ft.dropdown.Option("write", "Write"),
+            ft.dropdown.Option("manage", "Manage"),
+        ]
+
+    def go_share(self, *, menu_mode: bool = False):
         s = self.current_storage or {}
         sid = s.get("id")
-        self._set_back(lambda: self.page.run_task(self._open_storage, sid))
+        self._share_ui_menu_mode = menu_mode
+        if menu_mode:
+            self._set_back(self.go_menu_editor)
+        else:
+            self._set_back(lambda: self.page.run_task(self._open_storage, sid))
         phone = ft.TextField(
-            label="Phone to share with",
+            label=self._("share_phone_label"),
             hint_text="+9715...",
             prefix_icon=ft.Icons.PERSON_ADD_ALT,
             border_radius=14,
@@ -5977,14 +6801,12 @@ class QRVaultApp:
             focused_border_color=C.primary,
             color=C.text,
         )
+        perm_options = self._share_permission_options(menu_mode)
+        default_perm = "write" if menu_mode else "read"
         permission = ft.Dropdown(
-            label="Permission",
-            value="read",
-            options=[
-                ft.dropdown.Option("read", "Read"),
-                ft.dropdown.Option("write", "Write"),
-                ft.dropdown.Option("manage", "Manage"),
-            ],
+            label=self._("share_permission_label"),
+            value=default_perm,
+            options=perm_options,
             border_radius=14,
             bgcolor=C.surface,
             border_color=C.border,
@@ -5998,6 +6820,8 @@ class QRVaultApp:
                 return
             self.page.run_task(self._share, sid, phone.value.strip(), permission.value, shares_list)
 
+        title = self._("menu_share_title") if menu_mode else self._("share_storage")
+        hint = self._("menu_share_hint") if menu_mode else self._("share_accept_hint")
         self.set_view(
             ft.Column(
                 [
@@ -6008,21 +6832,25 @@ class QRVaultApp:
                                 icon_color=C.text,
                                 on_click=self._request_back,
                             ),
-                            section_title("Share storage"),
+                            section_title(title),
                         ]
                     ),
-                    muted(f"QR {s.get('qr_code')} — send a request; they must accept before seeing this vault"),
+                    muted(hint),
                     card(
                         ft.Column(
                             [
                                 phone,
                                 permission,
-                                primary_button("Send share request", do_share, ft.Icons.IOS_SHARE),
+                                primary_button(
+                                    self._("send_share_request"),
+                                    do_share,
+                                    ft.Icons.IOS_SHARE,
+                                ),
                             ],
                             spacing=12,
                         )
                     ),
-                    muted("Share requests & access"),
+                    muted(self._("share_list_title")),
                     ft.Container(content=shares_list, expand=True),
                 ],
                 spacing=12,
@@ -6032,19 +6860,26 @@ class QRVaultApp:
         self.page.run_task(self._load_shares, sid, shares_list)
 
     async def _load_shares(self, storage_id: int, shares_list: ft.ListView):
+        menu_mode = bool(getattr(self, "_share_ui_menu_mode", False))
         try:
             shares = await asyncio.to_thread(self.api.list_shares, storage_id)
         except ApiError as e:
             self.toast(e.message, error=True)
             return
         if not shares:
-            shares_list.controls = [muted("No share requests yet")]
+            shares_list.controls = [muted(self._("share_no_requests"))]
             self.page.update()
             return
+        perm_options = self._share_permission_options(menu_mode)
+        valid_perms = {"write", "manage"} if menu_mode else {"read", "write", "manage"}
         controls = []
         for sh in shares:
             phone = sh.get("user_phone") or ""
-            current_perm = sh.get("permission") or "read"
+            current_perm = sh.get("permission") or ("write" if menu_mode else "read")
+            if menu_mode and current_perm == "read":
+                current_perm = "write"
+            if current_perm not in valid_perms:
+                current_perm = "write" if menu_mode else "read"
             status = sh.get("status") or "pending"
             status_color = {
                 "accepted": C.success,
@@ -6053,12 +6888,8 @@ class QRVaultApp:
             }.get(status, C.text_muted)
             perm_dd = ft.Dropdown(
                 value=current_perm,
-                options=[
-                    ft.dropdown.Option("read", "Read"),
-                    ft.dropdown.Option("write", "Write"),
-                    ft.dropdown.Option("manage", "Manage"),
-                ],
-                width=140,
+                options=perm_options,
+                expand=True,
                 border_radius=12,
                 bgcolor=C.surface_alt,
                 border_color=C.border,
@@ -6082,30 +6913,43 @@ class QRVaultApp:
                         [
                             ft.Row(
                                 [
-                                    ft.Column(
-                                        [
-                                            ft.Text(phone, color=C.text, weight=ft.FontWeight.W_600),
-                                            muted(f"Status: {status}"),
-                                        ],
-                                        spacing=2,
+                                    ft.Text(
+                                        phone,
+                                        color=C.text,
+                                        weight=ft.FontWeight.W_600,
+                                        size=14,
+                                        max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
                                         expand=True,
                                     ),
-                                    chip(status.upper(), status_color),
-                                    perm_dd,
                                     ft.IconButton(
                                         ft.Icons.DELETE_OUTLINE,
                                         icon_color=C.danger,
                                         tooltip="Revoke",
+                                        icon_size=20,
                                         on_click=lambda e, share_id=sh["id"]: self.page.run_task(
                                             self._revoke, storage_id, share_id, shares_list
                                         ),
                                     ),
                                 ],
+                                spacing=4,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            muted(f"Share QR: {sh.get('share_qr_payload')}"),
+                            ft.Row(
+                                [
+                                    chip(status.upper(), status_color),
+                                    perm_dd,
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            muted(
+                                f"Share QR: {sh.get('share_qr_payload')}",
+                                size=11,
+                            ),
                         ],
-                        spacing=6,
+                        spacing=8,
+                        tight=True,
                     ),
                 )
             )
