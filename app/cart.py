@@ -22,18 +22,28 @@ def parse_price_number(price: Any) -> float:
 
 
 class MenuCart:
-    """Session cart for one restaurant menu storage."""
+    """In-memory cart scoped to one logged-in user + one menu storage."""
 
     def __init__(self):
+        self._user_id: Any = None
         self._storage_id: int | None = None
         self._items: dict[str, dict[str, Any]] = {}
         self._order_note: str = ""
 
-    def bind_storage(self, storage_id: int | None) -> None:
-        if storage_id != self._storage_id:
+    def bind_storage(self, storage_id: int | None, *, user_id: Any = None) -> None:
+        """Keep cart only while the same user is viewing the same menu storage."""
+        if storage_id != self._storage_id or user_id != self._user_id:
             self._storage_id = storage_id
+            self._user_id = user_id
             self._items.clear()
             self._order_note = ""
+
+    def reset(self) -> None:
+        """Clear cart and drop user/storage binding (call on logout)."""
+        self._user_id = None
+        self._storage_id = None
+        self._items.clear()
+        self._order_note = ""
 
     def count(self) -> int:
         return sum(int(item.get("qty") or 0) for item in self._items.values())

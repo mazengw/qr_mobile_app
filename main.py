@@ -592,6 +592,7 @@ class QRVaultApp:
                     self.toast("Offline — opening with cached data")
                     self.go_home()
                     return
+                self.menu_cart.reset()
                 self.session.clear()
         self.go_login()
 
@@ -1288,6 +1289,7 @@ class QRVaultApp:
             self.page.drawer = None
         except Exception:
             pass
+        self.menu_cart.reset()
         self.session.clear()
         self.go_login()
 
@@ -3395,7 +3397,10 @@ class QRVaultApp:
         primary = menu.get("primary_color") or C.primary
         currency = menu.get("currency") or "SYP"
         restaurant = menu.get("restaurant_name") or s.get("title") or self._("menu_badge")
-        self.menu_cart.bind_storage(s.get("id"))
+        self.menu_cart.bind_storage(
+            s.get("id"),
+            user_id=(self.session.user or {}).get("id"),
+        )
 
         if self.menu_cart.is_empty():
             body = ft.Column(
@@ -3595,7 +3600,10 @@ class QRVaultApp:
         self._set_back(self.go_home)
         s = self.current_storage or {}
         sid = s.get("id")
-        self.menu_cart.bind_storage(sid)
+        self.menu_cart.bind_storage(
+            sid,
+            user_id=(self.session.user or {}).get("id"),
+        )
         menu = self._menu_payload()
         primary = menu.get("primary_color") or C.primary
         can_write = self._can_write()
