@@ -40,8 +40,6 @@ from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_t
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
 from app.pdf_viewer_html import can_serve_pdf, prepare_pdf_viewer_dir, start_pdf_viewer_server
-from app.office_preview import can_preview_office, is_docx_name, is_xlsx_name
-from app.office_viewer_html import prepare_office_viewer_dir, start_office_viewer_server
 from app.qr_decode import decode_qr_payload
 from app.state import Session
 from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
@@ -101,15 +99,17 @@ def is_pdf(content_type: str, name: str = "") -> bool:
 
 def is_docx(content_type: str, name: str = "") -> bool:
     ct = (content_type or "").lower()
-    return is_docx_name(name) or "wordprocessingml" in ct or ct.endswith("docx")
+    ext = Path(name or "").suffix.lower()
+    return ext == ".docx" or "wordprocessingml" in ct or ct.endswith("docx")
 
 
 def is_xlsx(content_type: str, name: str = "") -> bool:
     ct = (content_type or "").lower()
-    return is_xlsx_name(name) or "spreadsheetml" in ct or ct.endswith("xlsx")
+    ext = Path(name or "").suffix.lower()
+    return ext == ".xlsx" or "spreadsheetml" in ct or ct.endswith("xlsx")
 
 
-def is_office_previewable(content_type: str, name: str = "") -> bool:
+def is_office_file(content_type: str, name: str = "") -> bool:
     return is_docx(content_type, name) or is_xlsx(content_type, name)
 
 
@@ -293,7 +293,6 @@ class QRVaultApp:
         self._scan_status: ft.Text | None = None
         self._scan_qr_field: ft.TextField | None = None
         self._pdf_server = None  # local HTTP server for official PDF.js viewer
-        self._office_server = None  # local HTTP server for DOCX/XLSX HTML preview
         self._pending_register_avatar: Path | None = None
         self._auth_error_text: ft.Text | None = None
         self._auth_error_banner_box: ft.Container | None = None
@@ -542,23 +541,10 @@ class QRVaultApp:
         except Exception:
             pass
 
-    def _stop_office_server(self):
-        srv = self._office_server
-        self._office_server = None
-        if srv is None:
-            return
-        try:
-            srv.shutdown()
-        except Exception:
-            pass
-        try:
-            srv.server_close()
-        except Exception:
-            pass
-
-    def _supports_html_webview(self) -> bool:
-        """Same platforms as PDF WebView (Android / iOS / macOS / web)."""
-        return self._supports_pdf_webview()
+    def _return_to_storage(self, _storage_id: int | None = None):
+        """Return from a file viewer without resetting the active filter chip."""
+        self._stop_pdf_server()
+        self.go_storage()
 
     def _configure_page(self):
         self.page.title = "QR Vault"
@@ -708,6 +694,7 @@ class QRVaultApp:
             try:
                 self.session.user = await asyncio.to_thread(self.api.me)
                 self.session.save()
+                await self._sync_avatar_cache()
                 await self._flush_offline_notes(silent=True)
                 self.go_home()
                 return
@@ -1039,6 +1026,7 @@ class QRVaultApp:
         try:
             await asyncio.to_thread(self.api.login, phone, password)
             self._set_auth_form_error(None)
+            await self._sync_avatar_cache()
             self.toast(self._("signed_in_ok"))
             self.go_home()
         except Exception as e:
@@ -1054,9 +1042,14 @@ class QRVaultApp:
             if avatar_path and avatar_path.is_file():
                 try:
                     await asyncio.to_thread(self.api.upload_avatar, avatar_path)
+                    try:
+                        await asyncio.to_thread(self.offline.save_avatar_file, avatar_path)
+                    except Exception:
+                        pass
                 except Exception:
                     # Account exists; photo can still be set later from the profile drawer.
                     pass
+            await self._sync_avatar_cache()
             self._set_auth_form_error(None)
             self.toast(self._("account_created"))
             self.go_home()
@@ -1080,10 +1073,10 @@ class QRVaultApp:
 
     def _avatar_image(self, *, size: float = 48, radius: float | None = None) -> ft.Control:
         r = size / 2 if radius is None else radius
-        url = (self.session.user or {}).get("avatar_url")
-        if url:
+        src = self._avatar_display_src()
+        if src:
             inner: ft.Control = ft.Image(
-                src=str(url),
+                src=str(src),
                 width=size,
                 height=size,
                 fit=ft.BoxFit.COVER,
@@ -1101,6 +1094,47 @@ class QRVaultApp:
             alignment=ft.Alignment.CENTER,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
+
+    def _avatar_display_src(self) -> str | None:
+        """Prefer locally cached avatar (works offline), else remote URL."""
+        local = self.offline.get_avatar_path()
+        if local is not None:
+            return str(local)
+        url = (self.session.user or {}).get("avatar_url")
+        return str(url) if url else None
+
+    async def _sync_avatar_cache(self):
+        """Download profile avatar into offline cache when online."""
+        url = (self.session.user or {}).get("avatar_url")
+        if not url:
+            self.offline.clear_avatar()
+            return
+        full = str(url)
+        if full.startswith("/"):
+            full = f"{self.session.base_url.rstrip('/')}{full}"
+        try:
+            import httpx
+
+            def _download() -> bytes:
+                headers = {}
+                if self.session.access:
+                    headers["Authorization"] = f"Bearer {self.session.access}"
+                with httpx.Client(timeout=30, follow_redirects=True) as client:
+                    r = client.get(full, headers=headers)
+                    r.raise_for_status()
+                    return r.content
+
+            data = await asyncio.to_thread(_download)
+            if not data:
+                return
+            # Guess extension from URL path
+            suf = Path(full.split("?", 1)[0]).suffix.lower()
+            if suf not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                suf = ".jpg"
+            await asyncio.to_thread(self.offline.save_avatar_bytes, data, suffix=suf)
+        except Exception:
+            # Keep previous cache if download fails (offline-friendly).
+            pass
 
     def _drawer_profile_avatar(self) -> ft.Control:
         """Avatar with camera badge — tap opens viewer + edit actions."""
@@ -1228,14 +1262,14 @@ class QRVaultApp:
         except Exception:
             pass
 
-        url = (self.session.user or {}).get("avatar_url")
-        has_photo = bool(url)
+        src = self._avatar_display_src()
+        has_photo = bool(src)
         preview_size = 220.0
 
         if has_photo:
             preview: ft.Control = ft.Container(
                 content=ft.Image(
-                    src=str(url),
+                    src=str(src),
                     width=preview_size,
                     height=preview_size,
                     fit=ft.BoxFit.COVER,
@@ -1328,6 +1362,11 @@ class QRVaultApp:
         path = Path(files[0].path)
         try:
             await asyncio.to_thread(self.api.upload_avatar, path)
+            try:
+                await asyncio.to_thread(self.offline.save_avatar_file, path)
+            except Exception:
+                pass
+            await self._sync_avatar_cache()
             self.toast(self._("photo_updated"))
             self.go_home()
         except ApiError as e:
@@ -1339,6 +1378,7 @@ class QRVaultApp:
         await self._dismiss_overlays()
         try:
             await asyncio.to_thread(self.api.delete_avatar)
+            self.offline.clear_avatar()
             self.toast(self._("photo_removed"))
             self.go_home()
         except ApiError as e:
@@ -1561,6 +1601,10 @@ class QRVaultApp:
 
     async def _refresh_home(self, list_view):
         await self._flush_offline_notes(silent=True)
+        try:
+            await self._sync_avatar_cache()
+        except Exception:
+            pass
         await self._load_incoming_shares()
         await self._load_storages(list_view)
 
@@ -2754,6 +2798,26 @@ class QRVaultApp:
             fit=ft.BoxFit.COVER,
         )
 
+    def _menu_cached_path(self, file_id: int | None) -> str | None:
+        if not file_id:
+            return None
+        cached = self._menu_image_cache.get(file_id)
+        if cached:
+            return str(cached)
+        sid = int((self.current_storage or {}).get("id") or 0)
+        if not sid:
+            return None
+        try:
+            path = self.offline.find_cached_file(
+                sid, int(file_id), self._menu_file_name(int(file_id))
+            )
+        except Exception:
+            path = None
+        if path and path.is_file():
+            self._menu_image_cache[file_id] = str(path)
+            return str(path)
+        return None
+
     def _menu_photo_box(
         self,
         file_id,
@@ -2765,7 +2829,7 @@ class QRVaultApp:
     ) -> tuple[ft.Container, int | None]:
         fid = self._menu_file_id(file_id)
         h = int(height or 88)
-        cached = self._menu_image_cache.get(fid) if fid else None
+        cached = self._menu_cached_path(fid)
         if width is None:
             if cached:
                 inner: ft.Control = ft.Image(
@@ -5004,6 +5068,8 @@ class QRVaultApp:
         for kind, label in [
             ("all", self._("filter_all")),
             ("images", self._("filter_images")),
+            ("videos", self._("filter_videos")),
+            ("audio", self._("filter_audio")),
             ("docs", self._("filter_docs")),
             ("notes", self._("filter_notes")),
         ]:
@@ -5365,6 +5431,26 @@ class QRVaultApp:
             self.toast(err.message, error=True)
             await self._load_files(storage_id)
 
+    def _file_matches_kind(self, f: dict, kind: str | None) -> bool:
+        """Client-side filter; uses MIME + extension (m4a often has wrong MIME)."""
+        if not kind or kind in ("all", "notes"):
+            return True
+        name = f.get("original_name") or f.get("name") or ""
+        ct = f.get("content_type") or ""
+        if kind == "images":
+            return is_image(ct, name)
+        if kind == "videos":
+            return is_video(ct, name)
+        if kind == "audio":
+            return is_audio(ct, name)
+        if kind == "docs":
+            return (
+                not is_image(ct, name)
+                and not is_video(ct, name)
+                and not is_audio(ct, name)
+            )
+        return True
+
     async def _load_files(self, storage_id: int, files_col=None, filter_row=None):
         host = self._files_host
         if host is None:
@@ -5394,10 +5480,8 @@ class QRVaultApp:
             )
             notes = self.offline.merge_notes_for_display(storage_id, server_notes)
             files = self.offline.merge_files_for_display(storage_id, all_files or [])
-            if kind == "images":
-                files = [f for f in files if str(f.get("content_type") or "").startswith("image/")]
-            elif kind == "docs":
-                files = [f for f in files if not str(f.get("content_type") or "").startswith("image/")]
+            if kind:
+                files = [f for f in files if self._file_matches_kind(f, kind)]
             if self.file_filter == "notes":
                 files = []
             self._offline_mode = False
@@ -5408,11 +5492,11 @@ class QRVaultApp:
             if snap:
                 self._offline_mode = True
                 files = self.offline.merge_files_for_display(storage_id, snap.get("files") or [])
-                if kind == "images":
-                    files = [f for f in files if str(f.get("content_type") or "").startswith("image/")]
-                elif kind == "docs":
-                    files = [f for f in files if not str(f.get("content_type") or "").startswith("image/")]
+                if kind:
+                    files = [f for f in files if self._file_matches_kind(f, kind)]
                 notes = self.offline.merge_notes_for_display(storage_id, snap.get("notes") or [])
+                if self.file_filter == "notes":
+                    files = []
                 if snap.get("storage"):
                     self.current_storage = snap["storage"]
                 if isinstance(e, ApiError) or is_network_error(e):
@@ -5953,8 +6037,7 @@ class QRVaultApp:
         """Fixed-size chrome around the PDF viewer (container size does not grow)."""
 
         def _back(_e=None):
-            self._stop_pdf_server()
-            self.page.run_task(self._open_storage, storage_id)
+            self._return_to_storage(storage_id)
 
         self._set_back(_back)
         actions: list[ft.Control] = [
@@ -6115,10 +6198,8 @@ class QRVaultApp:
                 await self._open_local_file(dest, name, "application/pdf")
             return
 
-        if is_office_previewable(content_type, name):
-            ok = await self._open_office_preview(storage_id, name, dest, content_type)
-            if not ok:
-                await self._open_local_file(dest, name, guess_mime(name, content_type))
+        if is_office_file(content_type, name):
+            await self._show_external_open(storage_id, name, dest, content_type)
             return
 
         # Built-in media / text → in-app viewer
@@ -6142,7 +6223,7 @@ class QRVaultApp:
         await self._open_local_file(path, name, mime)
 
         def _back(_e=None):
-            self.page.run_task(self._open_storage, storage_id)
+            self._return_to_storage(storage_id)
 
         self._set_back(_back)
         self.set_view(
@@ -6198,170 +6279,6 @@ class QRVaultApp:
             )
         )
 
-    def _office_shell(
-        self,
-        storage_id: int,
-        name: str,
-        path: Path,
-        body: ft.Control,
-        *,
-        subtitle: str,
-        viewer_url: str | None = None,
-        mime: str = "",
-    ):
-        def _back(_e=None):
-            self._stop_office_server()
-            self.page.run_task(self._open_storage, storage_id)
-
-        self._set_back(_back)
-        actions: list[ft.Control] = [
-            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
-            ft.Column(
-                [
-                    ft.Text(
-                        name,
-                        size=16,
-                        weight=ft.FontWeight.W_700,
-                        color=C.text,
-                        max_lines=1,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                    muted(subtitle),
-                ],
-                spacing=2,
-                expand=True,
-            ),
-        ]
-        if viewer_url:
-            actions.append(
-                ft.IconButton(
-                    ft.Icons.REFRESH,
-                    icon_color=C.text,
-                    tooltip=self._("office_reopen"),
-                    on_click=lambda e, u=viewer_url: self._open_external(u),
-                )
-            )
-        actions.append(
-            ft.IconButton(
-                ft.Icons.OPEN_IN_NEW,
-                icon_color=C.text,
-                tooltip=self._("open_with_app"),
-                on_click=lambda e, p=path, n=name, m=mime: self.page.run_task(
-                    self._open_local_file, p, n, m
-                ),
-            )
-        )
-        frame = ft.Container(
-            content=body,
-            expand=True,
-            bgcolor="#0B1220",
-            border_radius=12,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            border=ft.Border.all(1, C.border),
-        )
-        self.set_view(
-            ft.Column(
-                [ft.Row(actions), frame],
-                spacing=8,
-                expand=True,
-            )
-        )
-
-    async def _open_office_preview(
-        self, storage_id: int, name: str, path: Path, content_type: str = ""
-    ) -> bool:
-        """In-app HTML preview for DOCX/XLSX (does not touch PDF viewer)."""
-        if not can_preview_office(path, name):
-            return False
-        mime = guess_mime(name, content_type)
-        self._stop_office_server()
-        try:
-            session = await asyncio.to_thread(
-                prepare_office_viewer_dir, path, name, work_root=PREVIEW_DIR
-            )
-            server, url = await asyncio.to_thread(start_office_viewer_server, session)
-        except Exception as exc:
-            self.toast(str(exc), error=True)
-            return False
-        self._office_server = server
-
-        if self._supports_html_webview():
-            assert fwv is not None
-
-            async def _on_webview_error(e):
-                msg = str(getattr(e, "data", e) or "")
-                if "CLEARTEXT" in msg.upper() or "ERR_" in msg.upper():
-                    self.toast(self._("office_cleartext_hint"), error=True)
-                    await self._open_local_file(path, name, mime)
-                    return
-                self.toast(msg or self._("file_open_failed"), error=True)
-
-            wv = fwv.WebView(
-                url=url,
-                expand=True,
-                bgcolor="#0B1220",
-                on_web_resource_error=_on_webview_error,
-            )
-            self._office_shell(
-                storage_id,
-                name,
-                path,
-                wv,
-                subtitle=self._("office_viewer"),
-                viewer_url=url,
-                mime=mime,
-            )
-            try:
-                await wv.set_javascript_mode(fwv.JavaScriptMode.UNRESTRICTED)
-            except Exception:
-                pass
-            try:
-                await wv.enable_zoom()
-            except Exception:
-                pass
-            return True
-
-        # Windows/Linux desktop: open HTML preview in the system browser.
-        try:
-            webbrowser.open(url)
-        except Exception:
-            await self._open_local_file(path, name, mime)
-            return True
-
-        self._office_shell(
-            storage_id,
-            name,
-            path,
-            ft.Column(
-                [
-                    ft.Icon(file_icon(content_type, name), size=48, color=C.primary),
-                    muted(self._("office_opened_external")),
-                    muted(self._("office_external_hint")),
-                    primary_button(
-                        self._("office_reopen"),
-                        lambda e, u=url: webbrowser.open(u),
-                        ft.Icons.OPEN_IN_BROWSER,
-                        expand=False,
-                    ),
-                    ghost_button(
-                        self._("open_with_app"),
-                        lambda e, p=path, n=name, m=mime: self.page.run_task(
-                            self._open_local_file, p, n, m
-                        ),
-                        ft.Icons.OPEN_IN_NEW,
-                    ),
-                ],
-                spacing=10,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                alignment=ft.MainAxisAlignment.CENTER,
-                expand=True,
-            ),
-            subtitle=self._("office_viewer"),
-            viewer_url=url,
-            mime=mime,
-        )
-        return True
-
     def go_full_viewer(
         self,
         storage_id: int,
@@ -6376,12 +6293,12 @@ class QRVaultApp:
             self.page.run_task(self._open_pdf_official, storage_id, name, path)
             return
 
-        if is_office_previewable(content_type, name):
-            self.page.run_task(self._open_office_preview, storage_id, name, path, content_type)
+        if is_office_file(content_type, name):
+            self.page.run_task(self._show_external_open, storage_id, name, path, content_type)
             return
 
         def _back(_e=None):
-            self.page.run_task(self._open_storage, storage_id)
+            self._return_to_storage(storage_id)
 
         self._set_back(_back)
 
@@ -6397,7 +6314,7 @@ class QRVaultApp:
                         await video.stop()
                     except Exception:
                         pass
-                await self._open_storage(storage_id)
+                self._return_to_storage(storage_id)
 
             self._set_back(lambda _e=None: self.page.run_task(_back_audio))
             self.set_view(
@@ -6675,39 +6592,42 @@ class QRVaultApp:
 
         if is_image(ct, name):
             return ft.Container(
-                content=ft.Image(src=str(path), fit=ft.BoxFit.CONTAIN, expand=True),
+                content=ft.InteractiveViewer(
+                    expand=True,
+                    min_scale=1,
+                    max_scale=8,
+                    pan_enabled=True,
+                    scale_enabled=True,
+                    constrained=True,
+                    boundary_margin=ft.Margin.all(40),
+                    content=ft.Image(
+                        src=str(path),
+                        fit=ft.BoxFit.CONTAIN,
+                        expand=True,
+                    ),
+                ),
                 expand=True,
                 alignment=ft.Alignment.CENTER,
                 bgcolor="#000000",
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
             )
 
         if is_pdf(ct, name):
             sid = int((self.current_storage or {}).get("id") or 0)
             return self._pdf_open_panel(sid, path, name)
 
-        if is_office_previewable(ct, name):
+        if is_office_file(ct, name):
             return ft.Column(
                 [
                     ft.Icon(file_icon(ct, name), size=64, color=C.primary),
-                    muted(self._("office_tap_to_open")),
+                    muted(self._("external_open_hint")),
                     primary_button(
-                        self._("office_open_viewer"),
-                        lambda e, p=path, n=name, c=ct: self.page.run_task(
-                            self._open_office_preview,
-                            int((self.current_storage or {}).get("id") or 0),
-                            n,
-                            p,
-                            c,
-                        ),
-                        ft.Icons.DESCRIPTION_OUTLINED,
-                        expand=False,
-                    ),
-                    ghost_button(
                         self._("open_with_app"),
                         lambda e, p=path, n=name, c=ct: self.page.run_task(
                             self._open_local_file, p, n, guess_mime(n, c)
                         ),
                         ft.Icons.OPEN_IN_NEW,
+                        expand=False,
                     ),
                 ],
                 expand=True,
@@ -6861,7 +6781,15 @@ class QRVaultApp:
 
         if is_image(ct, name):
             return ft.Container(
-                content=ft.Image(src=str(path), fit=ft.BoxFit.CONTAIN, height=220, width=360),
+                content=ft.InteractiveViewer(
+                    min_scale=1,
+                    max_scale=6,
+                    pan_enabled=True,
+                    scale_enabled=True,
+                    constrained=True,
+                    boundary_margin=ft.Margin.all(24),
+                    content=ft.Image(src=str(path), fit=ft.BoxFit.CONTAIN, height=220, width=360),
+                ),
                 height=230,
                 bgcolor="#000000",
                 border_radius=12,
@@ -6873,20 +6801,16 @@ class QRVaultApp:
             sid = int((self.current_storage or {}).get("id") or 0)
             return self._pdf_open_panel(sid, path, name)
 
-        if is_office_previewable(ct, name):
+        if is_office_file(ct, name):
             return ft.Column(
                 [
-                    muted(self._("office_tap_to_open")),
+                    muted(self._("external_open_hint")),
                     primary_button(
-                        self._("office_open_viewer"),
+                        self._("open_with_app"),
                         lambda e, p=path, n=name, c=ct: self.page.run_task(
-                            self._open_office_preview,
-                            int((self.current_storage or {}).get("id") or 0),
-                            n,
-                            p,
-                            c,
+                            self._open_local_file, p, n, guess_mime(n, c)
                         ),
-                        ft.Icons.DESCRIPTION_OUTLINED,
+                        ft.Icons.OPEN_IN_NEW,
                         expand=False,
                     ),
                 ],

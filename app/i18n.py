@@ -275,6 +275,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "search_files": {"en": "Search files…", "ar": "بحث في الملفات…"},
     "filter_all": {"en": "All", "ar": "الكل"},
     "filter_images": {"en": "Images", "ar": "صور"},
+    "filter_videos": {"en": "Videos", "ar": "فيديو"},
+    "filter_audio": {"en": "Audio", "ar": "تسجيلات"},
     "filter_docs": {"en": "Docs", "ar": "مستندات"},
     "filter_notes": {"en": "Notes", "ar": "ملاحظات"},
     "owned": {"en": "OWNED", "ar": "ملكي"},

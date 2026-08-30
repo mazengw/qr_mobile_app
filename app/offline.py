@@ -63,6 +63,7 @@ class OfflineStore:
         self.snapshots_dir = self.root / "snapshots"
         self.files_dir = self.root / "files"
         self.pending_uploads_dir = self.root / "pending_uploads"
+        self.avatar_path = self.root / "profile_avatar"
         self.root.mkdir(parents=True, exist_ok=True)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +83,47 @@ class OfflineStore:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
+
+    # ── Profile avatar (offline-safe) ───────────────────────────
+    def get_avatar_path(self) -> Path | None:
+        """Return cached profile avatar file if present."""
+        # Prefer exact path; also accept common extensions written by sync.
+        candidates = [
+            self.avatar_path,
+            self.avatar_path.with_suffix(".jpg"),
+            self.avatar_path.with_suffix(".jpeg"),
+            self.avatar_path.with_suffix(".png"),
+            self.avatar_path.with_suffix(".webp"),
+        ]
+        for p in candidates:
+            try:
+                if p.is_file() and p.stat().st_size > 0:
+                    return p
+            except OSError:
+                continue
+        return None
+
+    def save_avatar_bytes(self, data: bytes, *, suffix: str = ".jpg") -> Path:
+        suf = suffix if suffix.startswith(".") else f".{suffix}"
+        # Clear previous variants
+        self.clear_avatar()
+        dest = self.avatar_path.with_suffix(suf or ".jpg")
+        dest.write_bytes(data)
+        return dest
+
+    def save_avatar_file(self, src: Path) -> Path:
+        suf = src.suffix.lower() or ".jpg"
+        self.clear_avatar()
+        dest = self.avatar_path.with_suffix(suf)
+        shutil.copy2(src, dest)
+        return dest
+
+    def clear_avatar(self) -> None:
+        for p in self.root.glob("profile_avatar*"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     # ── Note sync queue ─────────────────────────────────────────
     def load_queue(self) -> list[dict]:
