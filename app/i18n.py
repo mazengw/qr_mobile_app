@@ -378,6 +378,33 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ar": "تعذّر فتح ملف PDF. جرّب التنزيل من القائمة.",
     },
     "pdf_render_error": {"en": "PDF render error: {error}", "ar": "خطأ عرض PDF: {error}"},
+    "file_open_failed": {
+        "en": "Could not open this file. Try Download from the menu.",
+        "ar": "تعذّر فتح هذا الملف. جرّب التنزيل من القائمة.",
+    },
+    "external_open_hint": {
+        "en": "Open this file with another app on your device (Word, Excel, etc.).",
+        "ar": "افتح هذا الملف بتطبيق آخر على جهازك (Word أو Excel وغيرهما).",
+    },
+    "office_viewer": {"en": "Document preview", "ar": "معاينة المستند"},
+    "office_open_viewer": {"en": "Open document preview", "ar": "فتح معاينة المستند"},
+    "office_tap_to_open": {
+        "en": "Preview Word/Excel in the app, or open with another app.",
+        "ar": "عاين Word/Excel داخل التطبيق، أو افتحه بتطبيق آخر.",
+    },
+    "office_opened_external": {
+        "en": "Document preview opened in the browser.",
+        "ar": "تم فتح معاينة المستند في المتصفح.",
+    },
+    "office_external_hint": {
+        "en": "Keep this app open while viewing. You can also open the original file with Word/Excel.",
+        "ar": "أبقِ التطبيق مفتوحاً أثناء المعاينة. يمكنك أيضاً فتح الملف الأصلي بـ Word/Excel.",
+    },
+    "office_reopen": {"en": "Reopen preview", "ar": "إعادة فتح المعاينة"},
+    "office_cleartext_hint": {
+        "en": "In-app document preview needs cleartext (rebuild APK). Opening with another app…",
+        "ar": "معاينة المستند داخل التطبيق تحتاج cleartext (أعد بناء APK). جاري الفتح بتطبيق آخر…",
+    },
     "help_p1": {
         "en": "Scan a QR code to open or create a storage vault.",
         "ar": "امسح رمز QR لفتح خزنة أو إنشائها.",

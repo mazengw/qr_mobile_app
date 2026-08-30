@@ -40,6 +40,8 @@ from app.note_html import NOTE_COLORS, NOTE_SIZES, note_plain_preview, note_to_t
 from app.offline import OfflineStore, is_network_error
 from app.paths import downloads_dir
 from app.pdf_viewer_html import can_serve_pdf, prepare_pdf_viewer_dir, start_pdf_viewer_server
+from app.office_preview import can_preview_office, is_docx_name, is_xlsx_name
+from app.office_viewer_html import prepare_office_viewer_dir, start_office_viewer_server
 from app.qr_decode import decode_qr_payload
 from app.state import Session
 from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
@@ -97,6 +99,41 @@ def is_pdf(content_type: str, name: str = "") -> bool:
     return ct == "application/pdf" or Path(name).suffix.lower() == ".pdf"
 
 
+def is_docx(content_type: str, name: str = "") -> bool:
+    ct = (content_type or "").lower()
+    return is_docx_name(name) or "wordprocessingml" in ct or ct.endswith("docx")
+
+
+def is_xlsx(content_type: str, name: str = "") -> bool:
+    ct = (content_type or "").lower()
+    return is_xlsx_name(name) or "spreadsheetml" in ct or ct.endswith("xlsx")
+
+
+def is_office_previewable(content_type: str, name: str = "") -> bool:
+    return is_docx(content_type, name) or is_xlsx(content_type, name)
+
+
+def guess_mime(name: str, content_type: str = "") -> str:
+    ct = (content_type or "").strip()
+    if ct and ct != "application/octet-stream":
+        return ct
+    import mimetypes
+
+    guessed = mimetypes.guess_type(name or "")[0]
+    ext = Path(name or "").suffix.lower()
+    fallback = {
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".doc": "application/msword",
+        ".xls": "application/vnd.ms-excel",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".ppt": "application/vnd.ms-powerpoint",
+        ".rtf": "application/rtf",
+        ".zip": "application/zip",
+    }
+    return guessed or fallback.get(ext) or "application/octet-stream"
+
+
 def render_pdf_pages(pdf_path: Path, max_pages: int = 40, *, scale: float = 1.8) -> list[Path]:
     """Render PDF pages to PNGs when pypdfium2 is available (desktop).
 
@@ -139,19 +176,86 @@ def fmt_size(n: int | None) -> str:
     return f"{n / (1024 ** 2):.1f} MB"
 
 
-def file_icon(content_type: str) -> str:
+def file_icon(content_type: str, name: str = "") -> str:
+    """Pick a list/detail icon from MIME and/or filename extension.
+
+    Backend often stores m4a/etc as application/octet-stream, so extension
+    must be checked (same rules as is_audio / is_video).
+    """
     ct = (content_type or "").lower()
-    if ct.startswith("image/"):
+    ext = Path(name or "").suffix.lower()
+    if ct.startswith("image/") or ext in IMAGE_EXTS:
         return ft.Icons.IMAGE_OUTLINED
-    if "pdf" in ct:
+    if "pdf" in ct or ext == ".pdf":
         return ft.Icons.PICTURE_AS_PDF_OUTLINED
-    if "video" in ct:
+    if ct.startswith("video/") or "video" in ct or ext in VIDEO_EXTS:
         return ft.Icons.MOVIE_OUTLINED
-    if "audio" in ct:
-        return ft.Icons.AUDIOTRACK_OUTLINED
-    if "zip" in ct or "gzip" in ct:
+    if ct.startswith("audio/") or "audio" in ct or ext in AUDIO_EXTS:
+        return ft.Icons.MUSIC_NOTE
+    if ext in {".docx", ".doc"} or "wordprocessingml" in ct or "msword" in ct:
+        return ft.Icons.DESCRIPTION_OUTLINED
+    if ext in {".xlsx", ".xls", ".csv"} or "spreadsheetml" in ct or "ms-excel" in ct:
+        return ft.Icons.TABLE_CHART_OUTLINED
+    if ext in {".pptx", ".ppt"} or "presentationml" in ct:
+        return ft.Icons.SLIDESHOW_OUTLINED
+    if "zip" in ct or "gzip" in ct or ext in {".zip", ".gz", ".rar", ".7z"}:
         return ft.Icons.FOLDER_ZIP_OUTLINED
     return ft.Icons.INSERT_DRIVE_FILE_OUTLINED
+
+
+def _fmt_audio_ms(ms: int | float | None) -> str:
+    total = max(0, int((ms or 0) // 1000))
+    m, s = divmod(total, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _duration_to_ms(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, ft.Duration):
+        # Flet Duration.in_milliseconds is a @property (int), not a method.
+        return int(value.in_milliseconds)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, dict):
+        if "milliseconds" in value or "seconds" in value or "minutes" in value:
+            try:
+                return int(
+                    ft.Duration(
+                        **{
+                            k: int(v)
+                            for k, v in value.items()
+                            if k
+                            in {
+                                "days",
+                                "hours",
+                                "minutes",
+                                "seconds",
+                                "milliseconds",
+                                "microseconds",
+                            }
+                        }
+                    ).in_milliseconds
+                )
+            except Exception:
+                pass
+        for key in ("in_milliseconds", "milliseconds", "ms"):
+            if key in value:
+                try:
+                    return int(value[key])
+                except Exception:
+                    pass
+    data = getattr(value, "data", None)
+    if data is not None and data is not value:
+        return _duration_to_ms(data)
+    # Some event payloads expose in_milliseconds as an attribute/property.
+    ms_attr = getattr(value, "in_milliseconds", None)
+    if isinstance(ms_attr, (int, float)):
+        return int(ms_attr)
+    return 0
 
 
 class QRVaultApp:
@@ -189,10 +293,12 @@ class QRVaultApp:
         self._scan_status: ft.Text | None = None
         self._scan_qr_field: ft.TextField | None = None
         self._pdf_server = None  # local HTTP server for official PDF.js viewer
+        self._office_server = None  # local HTTP server for DOCX/XLSX HTML preview
         self._pending_register_avatar: Path | None = None
         self._auth_error_text: ft.Text | None = None
         self._auth_error_banner_box: ft.Container | None = None
         self._back_handler = None  # callable for system / gesture back
+        self._active_audio_video = None  # flet_video.Video while audio player is open
         self._drawer_open = False
         self._menu_image_cache: dict[int, str] = {}
         self._menu_draft: dict | None = None
@@ -380,7 +486,7 @@ class QRVaultApp:
                 mode=LaunchMode.EXTERNAL_APPLICATION,
             )
         except Exception as exc:
-            self.toast(self._("pdf_open_failed"), error=True)
+            self.toast(self._("file_open_failed"), error=True)
             self.toast(str(exc), error=True)
 
     def _pdf_fallback_panel(self, path: Path, name: str) -> ft.Control:
@@ -435,6 +541,24 @@ class QRVaultApp:
             srv.server_close()
         except Exception:
             pass
+
+    def _stop_office_server(self):
+        srv = self._office_server
+        self._office_server = None
+        if srv is None:
+            return
+        try:
+            srv.shutdown()
+        except Exception:
+            pass
+        try:
+            srv.server_close()
+        except Exception:
+            pass
+
+    def _supports_html_webview(self) -> bool:
+        """Same platforms as PDF WebView (Android / iOS / macOS / web)."""
+        return self._supports_pdf_webview()
 
     def _configure_page(self):
         self.page.title = "QR Vault"
@@ -5418,9 +5542,9 @@ class QRVaultApp:
         except ApiError as e:
             self.toast(e.message, error=True)
 
-    def _leading_placeholder(self, content_type: str) -> ft.Container:
+    def _leading_placeholder(self, content_type: str, name: str = "") -> ft.Container:
         return ft.Container(
-            content=ft.Icon(file_icon(content_type), color=C.accent, size=26),
+            content=ft.Icon(file_icon(content_type, name), color=C.accent, size=26),
             width=48,
             height=48,
             bgcolor=C.surface_alt,
@@ -5528,7 +5652,7 @@ class QRVaultApp:
                 ]
             )
 
-        leading = self._leading_placeholder(content_type)
+        leading = self._leading_placeholder(content_type, name)
         trailing: list[ft.Control] = []
         if pending:
             trailing.append(chip(self._("pending"), C.warning))
@@ -5618,7 +5742,7 @@ class QRVaultApp:
         playable = is_playable(content_type, name)
 
         leading = ft.Container(
-            content=ft.Icon(file_icon(content_type), color=C.accent, size=40),
+            content=ft.Icon(file_icon(content_type, name), color=C.accent, size=40),
             width=120,
             height=90,
             bgcolor=C.surface_alt,
@@ -5991,7 +6115,252 @@ class QRVaultApp:
                 await self._open_local_file(dest, name, "application/pdf")
             return
 
-        self.go_full_viewer(storage_id, name, dest, content_type or "")
+        if is_office_previewable(content_type, name):
+            ok = await self._open_office_preview(storage_id, name, dest, content_type)
+            if not ok:
+                await self._open_local_file(dest, name, guess_mime(name, content_type))
+            return
+
+        # Built-in media / text → in-app viewer
+        if (
+            is_image(content_type, name)
+            or is_video(content_type, name)
+            or is_audio(content_type, name)
+            or Path(name).suffix.lower() in TEXT_PREVIEW_EXTS
+            or (content_type or "").lower().startswith("text/")
+        ):
+            self.go_full_viewer(storage_id, name, dest, content_type or "")
+            return
+
+        # Any other format: open with an external app (Word, Excel, etc.).
+        await self._show_external_open(storage_id, name, dest, content_type)
+
+    async def _show_external_open(
+        self, storage_id: int, name: str, path: Path, content_type: str
+    ):
+        mime = guess_mime(name, content_type)
+        await self._open_local_file(path, name, mime)
+
+        def _back(_e=None):
+            self.page.run_task(self._open_storage, storage_id)
+
+        self._set_back(_back)
+        self.set_view(
+            ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.IconButton(
+                                ft.Icons.ARROW_BACK,
+                                icon_color=C.text,
+                                on_click=self._request_back,
+                            ),
+                            ft.Text(
+                                name,
+                                size=16,
+                                weight=ft.FontWeight.W_700,
+                                color=C.text,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                                expand=True,
+                            ),
+                        ]
+                    ),
+                    ft.Container(
+                        expand=True,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Column(
+                            [
+                                ft.Icon(file_icon(content_type, name), size=56, color=C.accent),
+                                muted(self._("external_open_hint")),
+                                primary_button(
+                                    self._("open_with_app"),
+                                    lambda e, p=path, n=name, m=mime: self.page.run_task(
+                                        self._open_local_file, p, n, m
+                                    ),
+                                    ft.Icons.OPEN_IN_NEW,
+                                    expand=False,
+                                ),
+                                ghost_button(
+                                    self._("download"),
+                                    lambda e, p=path, n=name: self._save_cached_copy(p, n),
+                                    ft.Icons.DOWNLOAD,
+                                ),
+                            ],
+                            spacing=12,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            tight=True,
+                        ),
+                    ),
+                ],
+                spacing=12,
+                expand=True,
+            )
+        )
+
+    def _office_shell(
+        self,
+        storage_id: int,
+        name: str,
+        path: Path,
+        body: ft.Control,
+        *,
+        subtitle: str,
+        viewer_url: str | None = None,
+        mime: str = "",
+    ):
+        def _back(_e=None):
+            self._stop_office_server()
+            self.page.run_task(self._open_storage, storage_id)
+
+        self._set_back(_back)
+        actions: list[ft.Control] = [
+            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
+            ft.Column(
+                [
+                    ft.Text(
+                        name,
+                        size=16,
+                        weight=ft.FontWeight.W_700,
+                        color=C.text,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    muted(subtitle),
+                ],
+                spacing=2,
+                expand=True,
+            ),
+        ]
+        if viewer_url:
+            actions.append(
+                ft.IconButton(
+                    ft.Icons.REFRESH,
+                    icon_color=C.text,
+                    tooltip=self._("office_reopen"),
+                    on_click=lambda e, u=viewer_url: self._open_external(u),
+                )
+            )
+        actions.append(
+            ft.IconButton(
+                ft.Icons.OPEN_IN_NEW,
+                icon_color=C.text,
+                tooltip=self._("open_with_app"),
+                on_click=lambda e, p=path, n=name, m=mime: self.page.run_task(
+                    self._open_local_file, p, n, m
+                ),
+            )
+        )
+        frame = ft.Container(
+            content=body,
+            expand=True,
+            bgcolor="#0B1220",
+            border_radius=12,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            border=ft.Border.all(1, C.border),
+        )
+        self.set_view(
+            ft.Column(
+                [ft.Row(actions), frame],
+                spacing=8,
+                expand=True,
+            )
+        )
+
+    async def _open_office_preview(
+        self, storage_id: int, name: str, path: Path, content_type: str = ""
+    ) -> bool:
+        """In-app HTML preview for DOCX/XLSX (does not touch PDF viewer)."""
+        if not can_preview_office(path, name):
+            return False
+        mime = guess_mime(name, content_type)
+        self._stop_office_server()
+        try:
+            session = await asyncio.to_thread(
+                prepare_office_viewer_dir, path, name, work_root=PREVIEW_DIR
+            )
+            server, url = await asyncio.to_thread(start_office_viewer_server, session)
+        except Exception as exc:
+            self.toast(str(exc), error=True)
+            return False
+        self._office_server = server
+
+        if self._supports_html_webview():
+            assert fwv is not None
+
+            async def _on_webview_error(e):
+                msg = str(getattr(e, "data", e) or "")
+                if "CLEARTEXT" in msg.upper() or "ERR_" in msg.upper():
+                    self.toast(self._("office_cleartext_hint"), error=True)
+                    await self._open_local_file(path, name, mime)
+                    return
+                self.toast(msg or self._("file_open_failed"), error=True)
+
+            wv = fwv.WebView(
+                url=url,
+                expand=True,
+                bgcolor="#0B1220",
+                on_web_resource_error=_on_webview_error,
+            )
+            self._office_shell(
+                storage_id,
+                name,
+                path,
+                wv,
+                subtitle=self._("office_viewer"),
+                viewer_url=url,
+                mime=mime,
+            )
+            try:
+                await wv.set_javascript_mode(fwv.JavaScriptMode.UNRESTRICTED)
+            except Exception:
+                pass
+            try:
+                await wv.enable_zoom()
+            except Exception:
+                pass
+            return True
+
+        # Windows/Linux desktop: open HTML preview in the system browser.
+        try:
+            webbrowser.open(url)
+        except Exception:
+            await self._open_local_file(path, name, mime)
+            return True
+
+        self._office_shell(
+            storage_id,
+            name,
+            path,
+            ft.Column(
+                [
+                    ft.Icon(file_icon(content_type, name), size=48, color=C.primary),
+                    muted(self._("office_opened_external")),
+                    muted(self._("office_external_hint")),
+                    primary_button(
+                        self._("office_reopen"),
+                        lambda e, u=url: webbrowser.open(u),
+                        ft.Icons.OPEN_IN_BROWSER,
+                        expand=False,
+                    ),
+                    ghost_button(
+                        self._("open_with_app"),
+                        lambda e, p=path, n=name, m=mime: self.page.run_task(
+                            self._open_local_file, p, n, m
+                        ),
+                        ft.Icons.OPEN_IN_NEW,
+                    ),
+                ],
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                expand=True,
+            ),
+            subtitle=self._("office_viewer"),
+            viewer_url=url,
+            mime=mime,
+        )
+        return True
 
     def go_full_viewer(
         self,
@@ -6007,10 +6376,63 @@ class QRVaultApp:
             self.page.run_task(self._open_pdf_official, storage_id, name, path)
             return
 
+        if is_office_previewable(content_type, name):
+            self.page.run_task(self._open_office_preview, storage_id, name, path, content_type)
+            return
+
         def _back(_e=None):
             self.page.run_task(self._open_storage, storage_id)
 
         self._set_back(_back)
+
+        # Audio: compact player card only (no full-screen empty frame).
+        if is_audio(content_type, name):
+            card = self._build_audio_player(name, path, width=340)
+
+            async def _back_audio(_e=None):
+                video = getattr(self, "_active_audio_video", None)
+                self._active_audio_video = None
+                if video is not None:
+                    try:
+                        await video.stop()
+                    except Exception:
+                        pass
+                await self._open_storage(storage_id)
+
+            self._set_back(lambda _e=None: self.page.run_task(_back_audio))
+            self.set_view(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.IconButton(
+                                    ft.Icons.ARROW_BACK,
+                                    icon_color=C.text,
+                                    on_click=lambda e: self.page.run_task(_back_audio),
+                                ),
+                                ft.Text(
+                                    name,
+                                    size=15,
+                                    weight=ft.FontWeight.W_700,
+                                    color=C.text,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    expand=True,
+                                ),
+                            ]
+                        ),
+                        ft.Container(
+                            expand=True,
+                            alignment=ft.Alignment.CENTER,
+                            content=card,
+                        ),
+                    ],
+                    spacing=12,
+                    expand=True,
+                )
+            )
+            return
+
         media = self._build_full_media(name, path, content_type)
         frame = ft.Container(
             content=media,
@@ -6055,31 +6477,189 @@ class QRVaultApp:
             )
         )
 
+    def _build_audio_player(self, name: str, path: Path, *, width: float = 320) -> ft.Control:
+        """Compact audio UI: play/pause, seek bar, current/total time."""
+        pos_label = ft.Text("0:00", size=12, color=C.text_muted, width=44)
+        dur_label = ft.Text("0:00", size=12, color=C.text_muted, width=44, text_align=ft.TextAlign.END)
+        play_icon = ft.Icons.PAUSE_ROUNDED  # autoplay starts playing
+        play_btn = ft.IconButton(
+            icon=play_icon,
+            icon_color="#0B1220",
+            bgcolor=C.primary,
+            icon_size=28,
+        )
+        seek = ft.Slider(
+            min=0,
+            max=1,
+            value=0,
+            active_color=C.primary,
+            inactive_color=C.border,
+            thumb_color=C.primary,
+            expand=True,
+        )
+
+        state = {
+            "duration_ms": 0,
+            "position_ms": 0,
+            "seeking": False,
+            "playing": True,
+            "video": None,
+        }
+
+        def _safe_update(*controls: ft.Control):
+            for c in controls:
+                try:
+                    c.update()
+                except Exception:
+                    pass
+
+        def _apply_duration(ms: int):
+            if ms <= 0:
+                return
+            state["duration_ms"] = ms
+            seek.max = float(ms)
+            if float(seek.value or 0) > ms:
+                seek.value = float(ms)
+            dur_label.value = _fmt_audio_ms(ms)
+            _safe_update(seek, dur_label)
+
+        def on_duration(e):
+            _apply_duration(_duration_to_ms(getattr(e, "data", e)))
+
+        def on_position(e):
+            if state["seeking"]:
+                return
+            ms = _duration_to_ms(getattr(e, "data", e))
+            state["position_ms"] = ms
+            if state["duration_ms"] > 0:
+                seek.value = float(min(ms, state["duration_ms"]))
+            pos_label.value = _fmt_audio_ms(ms)
+            _safe_update(seek, pos_label)
+
+        def on_complete(_e=None):
+            state["playing"] = False
+            play_btn.icon = ft.Icons.PLAY_ARROW_ROUNDED
+            _safe_update(play_btn)
+
+        async def on_load(_e=None):
+            video = state["video"]
+            if video is None:
+                return
+            try:
+                duration = await video.get_duration()
+                _apply_duration(_duration_to_ms(duration))
+            except Exception:
+                pass
+            try:
+                playing = await video.is_playing()
+                state["playing"] = bool(playing)
+                play_btn.icon = (
+                    ft.Icons.PAUSE_ROUNDED if playing else ft.Icons.PLAY_ARROW_ROUNDED
+                )
+                _safe_update(play_btn)
+            except Exception:
+                pass
+
+        async def toggle_play(_e=None):
+            video = state["video"]
+            if video is None:
+                return
+            try:
+                await video.play_or_pause()
+                playing = await video.is_playing()
+            except Exception as err:
+                self.toast(f"Playback error: {err}", error=True)
+                return
+            state["playing"] = bool(playing)
+            play_btn.icon = ft.Icons.PAUSE_ROUNDED if playing else ft.Icons.PLAY_ARROW_ROUNDED
+            _safe_update(play_btn)
+
+        def on_seek_start(_e=None):
+            state["seeking"] = True
+
+        async def on_seek_end(e):
+            video = state["video"]
+            ms = int(float(getattr(e.control, "value", 0) or 0))
+            state["position_ms"] = ms
+            pos_label.value = _fmt_audio_ms(ms)
+            _safe_update(pos_label)
+            if video is not None:
+                try:
+                    await video.seek(ft.Duration(milliseconds=ms))
+                except Exception as err:
+                    self.toast(f"Seek error: {err}", error=True)
+            state["seeking"] = False
+
+        play_btn.on_click = lambda e: self.page.run_task(toggle_play, e)
+        seek.on_change_start = on_seek_start
+        seek.on_change_end = lambda e: self.page.run_task(on_seek_end, e)
+
+        video = ftv.Video(
+            width=1,
+            height=1,
+            playlist=[ftv.VideoMedia(str(path))],
+            autoplay=True,
+            controls=None,
+            show_controls=False,
+            fill_color="#0B1220",
+            fit=ft.BoxFit.CONTAIN,
+            volume=100,
+            wakelock=True,
+            on_load=lambda e: self.page.run_task(on_load, e),
+            on_duration_change=on_duration,
+            on_position_change=on_position,
+            on_complete=on_complete,
+            on_error=lambda e: self.toast(f"Playback error: {getattr(e, 'data', e)}", error=True),
+        )
+        state["video"] = video
+        self._active_audio_video = video
+
+        return ft.Container(
+            width=width,
+            bgcolor=C.surface,
+            border=ft.Border.all(1, C.border),
+            border_radius=16,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=14),
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.MUSIC_NOTE, size=40, color=C.primary),
+                        width=72,
+                        height=72,
+                        bgcolor=C.surface_alt,
+                        border_radius=36,
+                        alignment=ft.Alignment.CENTER,
+                        border=ft.Border.all(1, C.border),
+                    ),
+                    ft.Text(
+                        name,
+                        color=C.text,
+                        weight=ft.FontWeight.W_600,
+                        size=14,
+                        text_align=ft.TextAlign.CENTER,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Row(
+                        [play_btn, pos_label, seek, dur_label],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=4,
+                    ),
+                    # Keep decoder alive off-layout; 1×1 is enough for audio-only.
+                    ft.Container(content=video, width=1, height=1, opacity=0.01),
+                ],
+                spacing=12,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
     def _build_full_media(self, name: str, path: Path, content_type: str) -> ft.Control:
         ct = (content_type or "").lower()
         ext = path.suffix.lower()
 
         if is_audio(ct, name):
-            player = ftv.Video(
-                expand=True,
-                playlist=[ftv.VideoMedia(str(path))],
-                autoplay=True,
-                show_controls=True,
-                fill_color="#0B1220",
-                fit=ft.BoxFit.CONTAIN,
-                volume=100,
-            )
-            return ft.Column(
-                [
-                    ft.Icon(ft.Icons.AUDIOTRACK, size=72, color=C.primary),
-                    ft.Text(name, color=C.text, weight=ft.FontWeight.W_600, text_align=ft.TextAlign.CENTER),
-                    ft.Container(content=player, height=90, width=320, border_radius=12, clip_behavior=ft.ClipBehavior.HARD_EDGE),
-                ],
-                expand=True,
-                spacing=16,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                alignment=ft.MainAxisAlignment.CENTER,
-            )
+            return self._build_audio_player(name, path, width=340)
 
         if is_video(ct, name):
             return ftv.Video(
@@ -6105,6 +6685,37 @@ class QRVaultApp:
             sid = int((self.current_storage or {}).get("id") or 0)
             return self._pdf_open_panel(sid, path, name)
 
+        if is_office_previewable(ct, name):
+            return ft.Column(
+                [
+                    ft.Icon(file_icon(ct, name), size=64, color=C.primary),
+                    muted(self._("office_tap_to_open")),
+                    primary_button(
+                        self._("office_open_viewer"),
+                        lambda e, p=path, n=name, c=ct: self.page.run_task(
+                            self._open_office_preview,
+                            int((self.current_storage or {}).get("id") or 0),
+                            n,
+                            p,
+                            c,
+                        ),
+                        ft.Icons.DESCRIPTION_OUTLINED,
+                        expand=False,
+                    ),
+                    ghost_button(
+                        self._("open_with_app"),
+                        lambda e, p=path, n=name, c=ct: self.page.run_task(
+                            self._open_local_file, p, n, guess_mime(n, c)
+                        ),
+                        ft.Icons.OPEN_IN_NEW,
+                    ),
+                ],
+                expand=True,
+                spacing=12,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+            )
+
         if ext in TEXT_PREVIEW_EXTS or ct.startswith("text/"):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -6120,13 +6731,20 @@ class QRVaultApp:
 
         return ft.Column(
             [
-                ft.Icon(file_icon(ct), size=64, color=C.accent),
-                muted("Preview not available for this type."),
+                ft.Icon(file_icon(ct, name), size=64, color=C.accent),
+                muted(self._("external_open_hint")),
                 primary_button(
-                    "Download copy",
+                    self._("open_with_app"),
+                    lambda e, p=path, n=name, c=ct: self.page.run_task(
+                        self._open_local_file, p, n, guess_mime(n, c)
+                    ),
+                    ft.Icons.OPEN_IN_NEW,
+                    expand=False,
+                ),
+                ghost_button(
+                    self._("download"),
                     lambda e: self._save_cached_copy(path, name),
                     ft.Icons.DOWNLOAD,
-                    expand=False,
                 ),
             ],
             expand=True,
@@ -6217,37 +6835,7 @@ class QRVaultApp:
         ext = path.suffix.lower()
 
         if is_audio(ct, name):
-            player = ftv.Video(
-                width=260,
-                height=70,
-                playlist=[ftv.VideoMedia(str(path))],
-                autoplay=True,
-                show_controls=True,
-                fill_color="#0B1220",
-                fit=ft.BoxFit.CONTAIN,
-                volume=100,
-                on_error=lambda e: self.toast(f"Playback error: {getattr(e, 'data', e)}", error=True),
-            )
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        muted("Audio player"),
-                        ft.Container(
-                            content=player,
-                            width=260,
-                            height=72,
-                            bgcolor="#0B1220",
-                            border_radius=12,
-                            border=ft.Border.all(1, C.border),
-                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                            padding=4,
-                        ),
-                    ],
-                    spacing=6,
-                    horizontal_alignment=ft.CrossAxisAlignment.START,
-                ),
-                alignment=ft.Alignment.CENTER_LEFT,
-            )
+            return self._build_audio_player(name, path, width=300)
 
         if is_video(ct, name):
             player = ftv.Video(
@@ -6285,6 +6873,26 @@ class QRVaultApp:
             sid = int((self.current_storage or {}).get("id") or 0)
             return self._pdf_open_panel(sid, path, name)
 
+        if is_office_previewable(ct, name):
+            return ft.Column(
+                [
+                    muted(self._("office_tap_to_open")),
+                    primary_button(
+                        self._("office_open_viewer"),
+                        lambda e, p=path, n=name, c=ct: self.page.run_task(
+                            self._open_office_preview,
+                            int((self.current_storage or {}).get("id") or 0),
+                            n,
+                            p,
+                            c,
+                        ),
+                        ft.Icons.DESCRIPTION_OUTLINED,
+                        expand=False,
+                    ),
+                ],
+                spacing=8,
+            )
+
         if ext in TEXT_PREVIEW_EXTS or ct.startswith("text/"):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -6305,12 +6913,19 @@ class QRVaultApp:
 
         return ft.Column(
             [
-                muted(f"{ct or 'unknown type'} · preview not available inline"),
+                muted(self._("external_open_hint")),
                 primary_button(
-                    "Download copy",
+                    self._("open_with_app"),
+                    lambda e, p=path, n=name, c=ct: self.page.run_task(
+                        self._open_local_file, p, n, guess_mime(n, c)
+                    ),
+                    ft.Icons.OPEN_IN_NEW,
+                    expand=False,
+                ),
+                ghost_button(
+                    self._("download"),
                     lambda e: self._save_cached_copy(path, name),
                     ft.Icons.DOWNLOAD,
-                    expand=False,
                 ),
             ],
             spacing=8,
@@ -6587,7 +7202,7 @@ class QRVaultApp:
                     content=ft.Row(
                         [
                             cb,
-                            ft.Icon(file_icon(f.get("content_type") or ""), color=C.accent, size=24),
+                            ft.Icon(file_icon(f.get("content_type") or "", name), color=C.accent, size=24),
                             ft.Column(
                                 [
                                     ft.Text(name, color=C.text, weight=ft.FontWeight.W_600, size=13, expand=True),
@@ -6739,7 +7354,7 @@ class QRVaultApp:
                         [
                             ft.Row(
                                 [
-                                    ft.Icon(file_icon(f.get("content_type") or ""), color=C.accent, size=28),
+                                    ft.Icon(file_icon(f.get("content_type") or "", name), color=C.accent, size=28),
                                     ft.Column(
                                         [
                                             ft.Text(name, color=C.text, weight=ft.FontWeight.W_600, expand=True),

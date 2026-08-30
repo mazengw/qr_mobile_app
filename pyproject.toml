@@ -19,7 +19,8 @@ permissions = ["camera", "location"]
 "android.hardware.camera" = false
 "android.hardware.camera.any" = false
 
-# Local PDF.js viewer is served over http://127.0.0.1 — Android blocks cleartext by default.
+# Local PDF.js + Office HTML viewers are served over http://127.0.0.1 —
+# Android blocks cleartext by default.
 [tool.flet.android.manifest_application]
 usesCleartextTraffic = "true"
 

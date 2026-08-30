@@ -241,6 +241,10 @@ jobs:
 
     - name: Flet Build APK
       run: |
+        # camera/location: QR scan + menu maps.
+        # Document/PDF in-app WebView uses http://127.0.0.1 (cleartext) via
+        # pyproject.toml [tool.flet.android.manifest_application] usesCleartextTraffic.
+        # No extra --permissions needed for DOCX/XLSX HTML preview or Share/open-with.
         flet build apk --yes --verbose --no-rich-output \
           --permissions camera location \
           --python-version 3.13 \
