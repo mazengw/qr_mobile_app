@@ -2135,6 +2135,8 @@ class QRVaultApp:
                 return
             storage = data.get("storage") or {}
             msg = data.get("message") or status
+            if status == "joined":
+                msg = data.get("message") or self._("joined_via_qr")
             if data.get("public_access") or storage.get("is_public"):
                 if (storage.get("my_permission") or "") == "read" and storage.get("is_public"):
                     msg = data.get("message") or "Public vault — view only"
@@ -7360,6 +7362,41 @@ class QRVaultApp:
             color=C.text,
         )
         shares_list = ft.ListView(expand=True, spacing=8)
+        join_qr_box = ft.Container(
+            bgcolor="#FFFFFF",
+            border_radius=16,
+            padding=12,
+            alignment=ft.Alignment.CENTER,
+            visible=False,
+            content=ft.Text(self._("join_qr_hint"), color="#64748B", size=12, text_align=ft.TextAlign.CENTER),
+        )
+        join_payload_text = muted("", size=11)
+        join_status = muted(self._("join_qr_hint"), size=12)
+        # Track last permission applied to the visible join QR (skip programmatic sync).
+        last_join_perm = {"value": permission.value or default_perm}
+        show_join_btn = primary_button(
+            self._("join_qr_generate"),
+            lambda _: None,
+            ft.Icons.QR_CODE_2,
+        )
+        join_actions_row = ft.Row(
+            [
+                ghost_button(
+                    self._("join_qr_regenerate"),
+                    lambda _: None,
+                    ft.Icons.REFRESH,
+                    expand=True,
+                ),
+                ghost_button(
+                    self._("join_qr_deactivate"),
+                    lambda _: None,
+                    ft.Icons.BLOCK,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+            visible=False,
+        )
 
         def do_share(_):
             if not phone.value:
@@ -7367,8 +7404,75 @@ class QRVaultApp:
                 return
             self.page.run_task(self._share, sid, phone.value.strip(), permission.value, shares_list)
 
+        def do_show_join_qr(_):
+            perm = permission.value or default_perm
+            last_join_perm["value"] = perm
+            self.page.run_task(
+                self._ensure_join_qr,
+                sid,
+                perm,
+                False,
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn,
+                join_actions_row,
+            )
+
+        def do_regenerate_join_qr(_):
+            perm = permission.value or default_perm
+            last_join_perm["value"] = perm
+            self.page.run_task(
+                self._ensure_join_qr,
+                sid,
+                perm,
+                True,
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn,
+                join_actions_row,
+            )
+
+        def do_deactivate_join_qr(_):
+            self.page.run_task(
+                self._deactivate_join_qr,
+                sid,
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn,
+                join_actions_row,
+            )
+
+        def on_permission_change(_):
+            perm = permission.value or default_perm
+            if perm == last_join_perm["value"]:
+                return
+            last_join_perm["value"] = perm
+            # Only refresh when a join QR is already on screen.
+            if not join_qr_box.visible:
+                return
+            self.page.run_task(
+                self._ensure_join_qr,
+                sid,
+                perm,
+                True,
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn,
+                join_actions_row,
+            )
+
+        permission.on_select = on_permission_change
+        permission.on_change = on_permission_change
+        show_join_btn.on_click = do_show_join_qr
+        join_actions_row.controls[0].on_click = do_regenerate_join_qr
+        join_actions_row.controls[1].on_click = do_deactivate_join_qr
+
         title = self._("menu_share_title") if menu_mode else self._("share_storage")
-        hint = self._("menu_share_hint") if menu_mode else self._("share_accept_hint")
+        hint = self._("menu_share_hint") if menu_mode else self._("share_unified_hint")
         self.set_view(
             ft.Column(
                 [
@@ -7386,13 +7490,27 @@ class QRVaultApp:
                     card(
                         ft.Column(
                             [
-                                phone,
                                 permission,
+                                phone,
                                 primary_button(
                                     self._("send_share_request"),
                                     do_share,
                                     ft.Icons.IOS_SHARE,
                                 ),
+                                ft.Row(
+                                    [
+                                        ft.Container(content=ft.Divider(color=C.border, height=1), expand=True),
+                                        muted(self._("share_or"), size=12),
+                                        ft.Container(content=ft.Divider(color=C.border, height=1), expand=True),
+                                    ],
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    spacing=8,
+                                ),
+                                join_status,
+                                join_qr_box,
+                                join_payload_text,
+                                show_join_btn,
+                                join_actions_row,
                             ],
                             spacing=12,
                         )
@@ -7402,9 +7520,183 @@ class QRVaultApp:
                 ],
                 spacing=12,
                 expand=True,
+                scroll=ft.ScrollMode.AUTO,
             )
         )
         self.page.run_task(self._load_shares, sid, shares_list)
+        self.page.run_task(
+            self._load_join_qr,
+            sid,
+            join_qr_box,
+            join_payload_text,
+            join_status,
+            permission,
+            last_join_perm,
+            show_join_btn,
+            join_actions_row,
+        )
+
+    def _set_join_qr_actions_visible(
+        self,
+        *,
+        active: bool,
+        show_join_btn: ft.Control | None = None,
+        join_actions_row: ft.Control | None = None,
+    ):
+        if show_join_btn is not None:
+            show_join_btn.visible = not active
+        if join_actions_row is not None:
+            join_actions_row.visible = active
+
+    def _render_join_qr_ui(
+        self,
+        link: dict | None,
+        join_qr_box: ft.Container,
+        join_payload_text: ft.Text,
+        join_status: ft.Text,
+        join_permission: ft.Dropdown | None = None,
+        last_join_perm: dict | None = None,
+        show_join_btn: ft.Control | None = None,
+        join_actions_row: ft.Control | None = None,
+    ):
+        if not link or not link.get("is_active"):
+            join_qr_box.visible = False
+            join_qr_box.content = ft.Text(
+                self._("join_qr_inactive") if link else self._("join_qr_hint"),
+                color="#64748B",
+                size=12,
+                text_align=ft.TextAlign.CENTER,
+            )
+            join_payload_text.value = ""
+            join_status.value = self._("join_qr_inactive") if link else self._("join_qr_hint")
+            self._set_join_qr_actions_visible(
+                active=False,
+                show_join_btn=show_join_btn,
+                join_actions_row=join_actions_row,
+            )
+            self.page.update()
+            return
+
+        payload = link.get("join_qr_payload") or ""
+        perm = link.get("permission") or ""
+        if join_permission is not None and perm:
+            if last_join_perm is not None:
+                last_join_perm["value"] = perm
+            join_permission.value = perm
+        try:
+            qr_b64 = order_qr_base64(payload)
+            join_qr_box.content = ft.Image(
+                src=f"data:image/png;base64,{qr_b64}",
+                width=220,
+                height=220,
+                fit=ft.BoxFit.CONTAIN,
+            )
+            join_qr_box.visible = True
+        except Exception as exc:
+            join_qr_box.visible = False
+            self.toast(str(exc), error=True)
+            self._set_join_qr_actions_visible(
+                active=False,
+                show_join_btn=show_join_btn,
+                join_actions_row=join_actions_row,
+            )
+            self.page.update()
+            return
+        join_payload_text.value = payload
+        join_status.value = (
+            f"{self._('join_qr_created')} · {perm}" if perm else self._("join_qr_created")
+        )
+        self._set_join_qr_actions_visible(
+            active=True,
+            show_join_btn=show_join_btn,
+            join_actions_row=join_actions_row,
+        )
+        self.page.update()
+
+    async def _load_join_qr(
+        self,
+        storage_id: int,
+        join_qr_box: ft.Container,
+        join_payload_text: ft.Text,
+        join_status: ft.Text,
+        join_permission: ft.Dropdown,
+        last_join_perm: dict | None = None,
+        show_join_btn: ft.Control | None = None,
+        join_actions_row: ft.Control | None = None,
+    ):
+        try:
+            link = await asyncio.to_thread(self.api.get_join_link, storage_id)
+        except ApiError as e:
+            if e.status_code == 404:
+                link = None
+            else:
+                self.toast(e.message, error=True)
+                return
+        if last_join_perm is not None and link and link.get("permission"):
+            last_join_perm["value"] = link["permission"]
+        self._render_join_qr_ui(
+            link,
+            join_qr_box,
+            join_payload_text,
+            join_status,
+            join_permission,
+            last_join_perm,
+            show_join_btn,
+            join_actions_row,
+        )
+
+    async def _ensure_join_qr(
+        self,
+        storage_id: int,
+        permission: str,
+        regenerate: bool,
+        join_qr_box: ft.Container,
+        join_payload_text: ft.Text,
+        join_status: ft.Text,
+        show_join_btn: ft.Control | None = None,
+        join_actions_row: ft.Control | None = None,
+    ):
+        try:
+            link = await asyncio.to_thread(
+                self.api.upsert_join_link,
+                storage_id,
+                permission or "read",
+                regenerate=regenerate,
+            )
+            self._render_join_qr_ui(
+                link,
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn=show_join_btn,
+                join_actions_row=join_actions_row,
+            )
+            self.toast(self._("join_qr_rotated") if regenerate else self._("join_qr_created"))
+        except ApiError as e:
+            self.toast(e.message, error=True)
+
+    async def _deactivate_join_qr(
+        self,
+        storage_id: int,
+        join_qr_box: ft.Container,
+        join_payload_text: ft.Text,
+        join_status: ft.Text,
+        show_join_btn: ft.Control | None = None,
+        join_actions_row: ft.Control | None = None,
+    ):
+        try:
+            await asyncio.to_thread(self.api.deactivate_join_link, storage_id)
+            self._render_join_qr_ui(
+                {"is_active": False},
+                join_qr_box,
+                join_payload_text,
+                join_status,
+                show_join_btn=show_join_btn,
+                join_actions_row=join_actions_row,
+            )
+            self.toast(self._("join_qr_disabled"))
+        except ApiError as e:
+            self.toast(e.message, error=True)
 
     async def _load_shares(self, storage_id: int, shares_list: ft.ListView):
         menu_mode = bool(getattr(self, "_share_ui_menu_mode", False))

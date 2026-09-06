@@ -482,3 +482,37 @@ class VaultAPI:
                 json={"share_id": share_id},
             )
             self._handle(r)
+
+    def get_join_link(self, storage_id: int) -> dict | None:
+        with httpx.Client(timeout=30) as client:
+            r = client.get(
+                self._url(f"/api/storages/{storage_id}/join-link/"),
+                headers=self._headers(),
+            )
+            if r.status_code == 404:
+                return None
+            return self._handle(r)
+
+    def upsert_join_link(
+        self,
+        storage_id: int,
+        permission: str = "read",
+        *,
+        regenerate: bool = False,
+    ) -> dict:
+        with httpx.Client(timeout=30) as client:
+            r = client.post(
+                self._url(f"/api/storages/{storage_id}/join-link/"),
+                headers=self._headers(),
+                json={"permission": permission, "regenerate": regenerate},
+            )
+            return self._handle(r)
+
+    def deactivate_join_link(self, storage_id: int) -> None:
+        with httpx.Client(timeout=30) as client:
+            r = client.request(
+                "DELETE",
+                self._url(f"/api/storages/{storage_id}/join-link/"),
+                headers=self._headers(),
+            )
+            self._handle(r)
