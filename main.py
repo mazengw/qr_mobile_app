@@ -891,10 +891,8 @@ class QRVaultApp:
         if not self._ai_fab_move_mode:
             return
         self._ai_fab_dragging = False
-        if self._ai_fab_host is not None:
-            self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
-            self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
-            self.session.save()
+        # Auto-save and leave move mode — no Done button needed.
+        self._exit_ai_fab_move_mode(save=True)
 
     def _clamp_ai_fab_pos(self, right: float, bottom: float) -> tuple[float, float]:
         fab = 58.0
@@ -1042,29 +1040,16 @@ class QRVaultApp:
                 bgcolor="#66000000",
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.Padding.only(top=40),
-                content=ft.Column(
-                    [
-                        ft.Container(
-                            bgcolor="#E60F172A",
-                            border_radius=18,
-                            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
-                            content=ft.Text(
-                                self._("ai_fab_move_banner"),
-                                color=C.text,
-                                size=13,
-                                text_align=ft.TextAlign.CENTER,
-                            ),
-                        ),
-                        ft.Container(height=8),
-                        primary_button(
-                            self._("ai_fab_done_move"),
-                            lambda e: self._exit_ai_fab_move_mode(save=True),
-                            ft.Icons.CHECK,
-                            expand=False,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    tight=True,
+                content=ft.Container(
+                    bgcolor="#E60F172A",
+                    border_radius=18,
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                    content=ft.Text(
+                        self._("ai_fab_move_banner"),
+                        color=C.text,
+                        size=13,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
                 ),
             ),
             on_pan_start=self._on_ai_fab_drag_update,
@@ -1074,6 +1059,7 @@ class QRVaultApp:
             on_vertical_drag_update=self._on_ai_fab_drag_update,
             on_horizontal_drag_end=self._on_ai_fab_drag_end,
             on_vertical_drag_end=self._on_ai_fab_drag_end,
+            on_tap=lambda e: self._exit_ai_fab_move_mode(save=True),
             drag_interval=8,
         )
         drag_layer = ft.Container(
