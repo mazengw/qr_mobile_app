@@ -212,6 +212,34 @@ _STRINGS: dict[str, dict[str, str]] = {
     "join_qr_rotated": {"en": "New join QR generated", "ar": "تم إنشاء رمز انضمام جديد"},
     "join_qr_disabled": {"en": "Join QR disabled", "ar": "تم تعطيل رمز الانضمام"},
     "joined_via_qr": {"en": "Joined storage via QR", "ar": "تم الانضمام عبر QR"},
+    "ai_agent": {"en": "AI Agent", "ar": "وكيل الذكاء"},
+    "ai_fab_tooltip": {
+        "en": "AI Agent — long-press to move",
+        "ar": "وكيل الذكاء — اضغط مطولاً للتحريك",
+    },
+    "ai_fab_drag_hint": {
+        "en": "Drag to move the AI button",
+        "ar": "اسحب لتحريك زر الذكاء",
+    },
+    "ai_agent_title": {"en": "AI Agent", "ar": "وكيل الذكاء الاصطناعي"},
+    "ai_agent_hint": {
+        "en": "Ask about this vault: files, notes, sharing, or menu ideas.",
+        "ar": "اسأل عن هذه الخزنة: الملفات، الملاحظات، المشاركة، أو أفكار القائمة.",
+    },
+    "ai_agent_placeholder": {"en": "Ask the agent…", "ar": "اسأل الوكيل…"},
+    "ai_agent_send": {"en": "Send", "ar": "إرسال"},
+    "ai_agent_thinking": {"en": "Thinking…", "ar": "جاري التفكير…"},
+    "ai_agent_not_ready": {
+        "en": "AI Agent is not configured on the server yet.",
+        "ar": "وكيل الذكاء غير مضبوط على السيرفر بعد.",
+    },
+    "ai_agent_empty": {
+        "en": "Try: Summarize this vault · Who can access it? · Draft a note",
+        "ar": "جرّب: لخّص هذه الخزنة · من يستطيع الوصول؟ · اكتب ملاحظة",
+    },
+    "ai_quick_summarize": {"en": "Summarize", "ar": "تلخيص"},
+    "ai_quick_access": {"en": "Who can access?", "ar": "من يصل؟"},
+    "ai_quick_find": {"en": "Find files", "ar": "ابحث ملفات"},
     "menu_badge": {"en": "MENU", "ar": "قائمة"},
     "customize_menu": {"en": "Customize menu", "ar": "تخصيص القائمة"},
     "menu_empty": {

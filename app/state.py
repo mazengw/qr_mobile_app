@@ -17,6 +17,8 @@ class Session:
         self.user: dict[str, Any] | None = None
         self.base_url: str = "http://127.0.0.1:8000"
         self.lang: str = "en"
+        self.ai_fab_right: float = 10.0
+        self.ai_fab_bottom: float = 18.0
         self.load()
 
     @property
@@ -33,6 +35,14 @@ class Session:
             self.user = data.get("user")
             self.base_url = data.get("base_url") or self.base_url
             self.lang = data.get("lang") or self.lang
+            try:
+                self.ai_fab_right = float(data.get("ai_fab_right", self.ai_fab_right))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.ai_fab_bottom = float(data.get("ai_fab_bottom", self.ai_fab_bottom))
+            except (TypeError, ValueError):
+                pass
         except Exception:
             pass
 
@@ -46,6 +56,8 @@ class Session:
                     "user": self.user,
                     "base_url": self.base_url,
                     "lang": self.lang,
+                    "ai_fab_right": self.ai_fab_right,
+                    "ai_fab_bottom": self.ai_fab_bottom,
                 },
                 indent=2,
             ),

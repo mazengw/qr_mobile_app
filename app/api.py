@@ -516,3 +516,31 @@ class VaultAPI:
                 headers=self._headers(),
             )
             self._handle(r)
+
+    def ai_status(self) -> dict:
+        with httpx.Client(timeout=20) as client:
+            r = client.get(self._url("/api/ai/status/"), headers=self._headers())
+            return self._handle(r)
+
+    def ai_chat(
+        self,
+        storage_id: int,
+        message: str,
+        history: list[dict] | None = None,
+    ) -> dict:
+        with httpx.Client(timeout=90) as client:
+            r = client.post(
+                self._url(f"/api/storages/{storage_id}/ai/chat/"),
+                headers=self._headers(),
+                json={"message": message, "history": history or []},
+            )
+            return self._handle(r)
+
+    def ai_home_chat(self, message: str, history: list[dict] | None = None) -> dict:
+        with httpx.Client(timeout=90) as client:
+            r = client.post(
+                self._url("/api/ai/chat/"),
+                headers=self._headers(),
+                json={"message": message, "history": history or []},
+            )
+            return self._handle(r)

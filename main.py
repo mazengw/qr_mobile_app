@@ -287,6 +287,19 @@ class QRVaultApp:
         self._storage_notes_cache: list[dict] = []
         self._vault_visible_items: list[dict] = []
         self._scan_camera = None
+        self._ai_history: list[dict] = []
+        self._ai_panel_visible = False
+        self._ai_fab_host: ft.Container | None = None
+        self._ai_sheet_host: ft.Container | None = None
+        self._ai_chat_list: ft.ListView | None = None
+        self._ai_status_text: ft.Text | None = None
+        self._ai_input: ft.TextField | None = None
+        self._ai_busy = False
+        self._ai_scope_storage_id: int | None = None
+        self._ai_fab_enabled = False
+        self._ai_fab_dragging = False
+        self._ai_fab_moved = False
+
         self._scan_busy = False
         self._scan_decode_pending = False
         self._scan_last_decode = 0.0
@@ -647,18 +660,33 @@ class QRVaultApp:
             except Exception:
                 pass
 
-    def set_view(self, body: ft.Control):
-        # SafeArea keeps content below the Android/iOS status bar & above home indicator.
-        self.root.content = ft.Container(
-            content=ft.SafeArea(
-                content=ft.Container(
-                    content=body,
-                    expand=True,
-                    padding=ft.Padding.only(left=18, right=18, top=12, bottom=8),
-                ),
+    def set_view(self, body: ft.Control, *, ai_fab: bool = False, ai_home: bool = False):
+        # Closing the AI sheet on navigation keeps overlays from sticking across screens.
+        self._ai_panel_visible = False
+        self._ai_fab_enabled = bool(ai_fab and self.session.is_authenticated)
+        if not self._ai_fab_enabled:
+            new_scope = None
+        elif ai_home:
+            new_scope = None
+        else:
+            new_scope = int((self.current_storage or {}).get("id") or 0) or None
+        if new_scope != self._ai_scope_storage_id:
+            self._ai_history = []
+        self._ai_scope_storage_id = new_scope
+        padded = ft.SafeArea(
+            content=ft.Container(
+                content=body,
                 expand=True,
-                maintain_bottom_view_padding=True,
+                padding=ft.Padding.only(left=18, right=18, top=12, bottom=8),
             ),
+            expand=True,
+            maintain_bottom_view_padding=True,
+        )
+        layers: list[ft.Control] = [padded]
+        if self._ai_fab_enabled:
+            layers.extend(self._build_ai_overlay_layers())
+        self.root.content = ft.Container(
+            content=ft.Stack(layers, expand=True),
             expand=True,
             gradient=ft.LinearGradient(
                 begin=ft.Alignment.TOP_LEFT,
@@ -667,6 +695,364 @@ class QRVaultApp:
             ),
         )
         self.page.update()
+
+    def _build_ai_fab(self) -> ft.Control:
+        btn = ft.Container(
+            width=58,
+            height=58,
+            bgcolor=C.primary,
+            border_radius=29,
+            alignment=ft.Alignment.CENTER,
+            shadow=ft.BoxShadow(
+                blur_radius=18,
+                color="#14B8A699",
+                offset=ft.Offset(0, 6),
+            ),
+            border=ft.Border.all(2, "#FFFFFF33"),
+            content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.bg, size=28),
+            tooltip=self._("ai_fab_tooltip"),
+        )
+
+        def on_long_press(_e):
+            self._ai_fab_dragging = True
+            self._ai_fab_moved = False
+            btn.border = ft.Border.all(3, C.warning)
+            btn.shadow = ft.BoxShadow(
+                blur_radius=26,
+                color="#F59E0B99",
+                offset=ft.Offset(0, 8),
+            )
+            try:
+                btn.update()
+            except Exception:
+                pass
+            self.toast(self._("ai_fab_drag_hint"))
+
+        def on_pan_update(e: ft.DragUpdateEvent):
+            if not self._ai_fab_dragging or not self._ai_fab_host:
+                return
+            delta = getattr(e, "local_delta", None)
+            if delta is not None:
+                dx = float(getattr(delta, "x", 0) or 0)
+                dy = float(getattr(delta, "y", 0) or 0)
+            else:
+                dx = float(getattr(e, "delta_x", 0) or 0)
+                dy = float(getattr(e, "delta_y", 0) or 0)
+            if abs(dx) > 0.5 or abs(dy) > 0.5:
+                self._ai_fab_moved = True
+            right = float(self._ai_fab_host.right or self.session.ai_fab_right or 10) - dx
+            bottom = float(self._ai_fab_host.bottom or self.session.ai_fab_bottom or 18) - dy
+            right, bottom = self._clamp_ai_fab_pos(right, bottom)
+            self._ai_fab_host.right = right
+            self._ai_fab_host.bottom = bottom
+            try:
+                self._ai_fab_host.update()
+            except Exception:
+                pass
+
+        def on_pan_end(_e):
+            if not self._ai_fab_dragging:
+                return
+            self._ai_fab_dragging = False
+            btn.border = ft.Border.all(2, "#FFFFFF33")
+            btn.shadow = ft.BoxShadow(
+                blur_radius=18,
+                color="#14B8A699",
+                offset=ft.Offset(0, 6),
+            )
+            try:
+                btn.update()
+            except Exception:
+                pass
+            if self._ai_fab_host is not None:
+                self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
+                self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
+                self.session.save()
+
+        def on_tap(_e):
+            if self._ai_fab_dragging or self._ai_fab_moved:
+                self._ai_fab_moved = False
+                return
+            self._toggle_ai_panel()
+
+        return ft.GestureDetector(
+            content=btn,
+            on_long_press_start=on_long_press,
+            on_pan_update=on_pan_update,
+            on_pan_end=on_pan_end,
+            on_tap=on_tap,
+            drag_interval=16,
+        )
+
+    def _clamp_ai_fab_pos(self, right: float, bottom: float) -> tuple[float, float]:
+        fab = 58.0
+        margin = 4.0
+        pw = float(self.page.width or 400)
+        ph = float(self.page.height or 800)
+        max_right = max(margin, pw - fab - margin)
+        max_bottom = max(margin, ph - fab - margin)
+        return (
+            min(max(margin, right), max_right),
+            min(max(margin, bottom), max_bottom),
+        )
+
+    def _build_ai_overlay_layers(self) -> list[ft.Control]:
+        chat_list = ft.ListView(expand=True, spacing=8, auto_scroll=True, padding=6)
+        status = muted(self._("ai_agent_empty"), size=12)
+        input_box = ft.TextField(
+            hint_text=self._("ai_agent_placeholder"),
+            border_radius=12,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            focused_border_color=C.primary,
+            color=C.text,
+            multiline=True,
+            min_lines=1,
+            max_lines=3,
+            expand=True,
+            text_size=13,
+        )
+        self._ai_chat_list = chat_list
+        self._ai_status_text = status
+        self._ai_input = input_box
+        # Restore history bubbles if any.
+        chat_list.controls = [
+            self._ai_bubble(h.get("role") or "assistant", h.get("content") or "")
+            for h in self._ai_history
+        ]
+
+        sheet_card = ft.Container(
+            width=360,
+            height=430,
+            bgcolor="#E6121A2B",
+            border=ft.Border.all(1, C.border),
+            border_radius=20,
+            padding=14,
+            shadow=ft.BoxShadow(blur_radius=24, color="#00000066", offset=ft.Offset(0, 8)),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Container(
+                                width=34,
+                                height=34,
+                                bgcolor=C.primary,
+                                border_radius=17,
+                                alignment=ft.Alignment.CENTER,
+                                content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.bg, size=18),
+                            ),
+                            ft.Text(
+                                self._("ai_agent_title"),
+                                color=C.text,
+                                weight=ft.FontWeight.W_700,
+                                size=16,
+                                expand=True,
+                            ),
+                            ft.IconButton(
+                                ft.Icons.CLOSE,
+                                icon_color=C.text_muted,
+                                icon_size=20,
+                                on_click=lambda e: self._close_ai_panel(),
+                            ),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    muted(self._("ai_agent_hint"), size=11),
+                    status,
+                    ft.Row(
+                        [
+                            ghost_button(
+                                self._("ai_quick_summarize"),
+                                lambda e: self._ai_quick_prompt("summarize"),
+                                expand=True,
+                            ),
+                            ghost_button(
+                                self._("ai_quick_access"),
+                                lambda e: self._ai_quick_prompt("access"),
+                                expand=True,
+                            ),
+                            ghost_button(
+                                self._("ai_quick_find"),
+                                lambda e: self._ai_quick_prompt("find"),
+                                expand=True,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                    ft.Container(content=chat_list, expand=True),
+                    ft.Row(
+                        [
+                            input_box,
+                            ft.IconButton(
+                                ft.Icons.SEND,
+                                icon_color=C.primary,
+                                on_click=lambda e: self.page.run_task(self._ai_send_message),
+                            ),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ],
+                spacing=8,
+                expand=True,
+            ),
+            on_click=lambda e: None,
+        )
+
+        sheet_host = ft.Container(
+            visible=False,
+            left=0,
+            top=0,
+            right=0,
+            bottom=0,
+            bgcolor="#55000000",
+            alignment=ft.Alignment.BOTTOM_RIGHT,
+            padding=ft.Padding.only(left=16, right=16, bottom=84, top=40),
+            content=sheet_card,
+            on_click=lambda e: self._close_ai_panel(),
+        )
+        # Important: do NOT expand — a full-screen host steals taps from the vault list.
+        right, bottom = self._clamp_ai_fab_pos(
+            float(self.session.ai_fab_right or 10),
+            float(self.session.ai_fab_bottom or 18),
+        )
+        fab_host = ft.Container(
+            content=self._build_ai_fab(),
+            width=58,
+            height=58,
+            right=right,
+            bottom=bottom,
+        )
+        self._ai_sheet_host = sheet_host
+        self._ai_fab_host = fab_host
+        return [sheet_host, fab_host]
+
+    def _ai_bubble(self, role: str, text: str) -> ft.Control:
+        mine = role == "user"
+        return ft.Container(
+            bgcolor=C.primary if mine else C.surface_alt,
+            border=None if mine else ft.Border.all(1, C.border),
+            border_radius=12,
+            padding=10,
+            content=ft.Text(
+                text,
+                color=C.bg if mine else C.text,
+                size=12,
+                selectable=True,
+            ),
+        )
+
+    def _toggle_ai_panel(self):
+        if self._ai_panel_visible:
+            self._close_ai_panel()
+        else:
+            self._open_ai_panel()
+
+    def _open_ai_panel(self):
+        if not self._ai_sheet_host:
+            return
+        self._ai_panel_visible = True
+        self._ai_sheet_host.visible = True
+        if self._ai_fab_host:
+            self._ai_fab_host.visible = False
+        self.page.update()
+        if self._ai_status_text is not None:
+            self.page.run_task(self._check_ai_ready, self._ai_status_text)
+
+    def _close_ai_panel(self):
+        self._ai_panel_visible = False
+        if self._ai_sheet_host:
+            self._ai_sheet_host.visible = False
+        if self._ai_fab_host:
+            self._ai_fab_host.visible = True
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _ai_quick_prompt(self, kind: str):
+        ar = normalize_lang(self.session.lang) == LANG_AR
+        home = self._ai_scope_storage_id is None
+        if kind == "summarize":
+            prompt = (
+                "لخّص خزائني الظاهرة في القائمة."
+                if home and ar
+                else "Summarize the vaults on my home list."
+                if home
+                else "لخّص هذه الخزنة: الملفات والملاحظات والمشاركة."
+                if ar
+                else "Summarize this storage: files, notes, and sharing."
+            )
+        elif kind == "access":
+            prompt = (
+                "ما الفرق بين الخزائن المملوكة والمشارَكة والعامة؟"
+                if home and ar
+                else "Explain owned vs shared vs public vaults on my list."
+                if home
+                else "من يستطيع الوصول لهذه الخزنة وكيف (مالك، مشاركات، عام، Join QR)؟"
+                if ar
+                else "Who can access this storage and how (owner, shares, public, join QR)?"
+            )
+        else:
+            prompt = (
+                "أي خزنة يجب أن أفتحها أولاً ولماذا؟"
+                if home and ar
+                else "Which vault should I open first and why?"
+                if home
+                else "اعرض أهم الملفات والملاحظات التي يجب أن أطلع عليها أولاً."
+                if ar
+                else "List the important files and notes I should look at first."
+            )
+        if self._ai_input is not None:
+            self._ai_input.value = prompt
+        self.page.run_task(self._ai_send_message)
+
+    async def _ai_send_message(self, _=None):
+        if self._ai_busy or self._ai_input is None or self._ai_chat_list is None:
+            return
+        msg = (self._ai_input.value or "").strip()
+        if not msg:
+            return
+        self._ai_input.value = ""
+        self._ai_busy = True
+        if self._ai_status_text is not None:
+            self._ai_status_text.value = self._("ai_agent_thinking")
+        self._ai_history.append({"role": "user", "content": msg})
+        self._ai_chat_list.controls.append(self._ai_bubble("user", msg))
+        self.page.update()
+        hist = [{"role": h["role"], "content": h["content"]} for h in self._ai_history[:-1]]
+        try:
+            if self._ai_scope_storage_id:
+                data = await asyncio.to_thread(
+                    self.api.ai_chat, self._ai_scope_storage_id, msg, hist
+                )
+            else:
+                data = await asyncio.to_thread(self.api.ai_home_chat, msg, hist)
+            reply = (data.get("reply") or "").strip() or "…"
+            self._ai_history.append({"role": "assistant", "content": reply})
+            self._ai_chat_list.controls.append(self._ai_bubble("assistant", reply))
+            if self._ai_status_text is not None:
+                self._ai_status_text.value = self._("ai_agent_hint")
+        except ApiError as e:
+            if self._ai_status_text is not None:
+                self._ai_status_text.value = e.message
+            self.toast(e.message, error=True)
+        except Exception as e:
+            if self._ai_status_text is not None:
+                self._ai_status_text.value = str(e)
+            self.toast(str(e), error=True)
+        finally:
+            self._ai_busy = False
+            self.page.update()
+
+    async def _check_ai_ready(self, status: ft.Text):
+        try:
+            data = await asyncio.to_thread(self.api.ai_status)
+            if not data.get("ready"):
+                status.value = self._("ai_agent_not_ready")
+                self.page.update()
+        except Exception:
+            status.value = self._("ai_agent_not_ready")
+            self.page.update()
 
     # ── Boot / Auth ─────────────────────────────────────────────
     def go_boot(self):
@@ -1444,7 +1830,9 @@ class QRVaultApp:
                 ],
                 spacing=14,
                 expand=True,
-            )
+            ),
+            ai_fab=True,
+            ai_home=True,
         )
         self.page.run_task(self._refresh_home, list_view)
 
@@ -2494,7 +2882,7 @@ class QRVaultApp:
             ),
         ]
 
-        self.set_view(ft.Column(body_controls, spacing=10, expand=True, tight=True))
+        self.set_view(ft.Column(body_controls, spacing=10, expand=True, tight=True), ai_fab=True)
         self._rebuild_filter_chips(filter_row, sid, on_select=set_filter)
         self._rebuild_view_toggle(view_toggle, sid, on_select=set_mode)
         self.page.run_task(self._load_files, sid)
@@ -4299,7 +4687,7 @@ class QRVaultApp:
         if cart_enabled and self.menu_cart.count() > 0:
             body_parts.append(self._menu_cart_summary_bar(primary=primary, currency=currency_code))
         body = ft.Column(body_parts, spacing=10, expand=True)
-        self.set_view(body)
+        self.set_view(body, ai_fab=True)
         if sid and image_jobs:
             self.page.run_task(self._hydrate_menu_images, sid, image_jobs)
 
