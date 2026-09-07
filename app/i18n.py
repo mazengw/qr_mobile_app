@@ -218,13 +218,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ar": "وكيل الذكاء — اضغط مطولاً للتحريك",
     },
     "ai_fab_drag_hint": {
-        "en": "Move mode: drag anywhere, tap to finish",
-        "ar": "وضع التحريك: اسحب في أي مكان ثم اضغط لإنهاء",
+        "en": "Move mode on — drag anywhere, then Done",
+        "ar": "وضع التحريك — اسحب في أي مكان ثم اضغط تم",
     },
     "ai_fab_move_banner": {
-        "en": "Drag to move AI button · Tap to finish",
-        "ar": "اسحب لتحريك زر الذكاء · اضغط لإنهاء التحريك",
+        "en": "Drag anywhere to move the AI button",
+        "ar": "اسحب في أي مكان لتحريك زر الذكاء",
     },
+    "ai_fab_done_move": {"en": "Done", "ar": "تم"},
     "ai_agent_title": {"en": "AI Agent", "ar": "وكيل الذكاء الاصطناعي"},
     "ai_agent_hint": {
         "en": "Ask about this vault: files, notes, sharing, or menu ideas.",

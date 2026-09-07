@@ -13,9 +13,10 @@ on:
 
 env:
   # https://flet.dev/docs/publish#versioning
-  # 1.1.1 — AI FAB sticky move-mode with full-screen touch pan layer (APK fix)
-  BUILD_NUMBER: 3
-  BUILD_VERSION: 1.1.1
+  # 1.1.2 — AI FAB: remove tooltip (blocked long-press on APK); sticky move-mode
+  # after long-press release + full-screen pan/drag catcher + Done button.
+  BUILD_NUMBER: 4
+  BUILD_VERSION: 1.1.2
   PYTHON_VERSION: 3.12.2
   # Matches flet 0.86.x (your venv requires 3.44.8)
   FLUTTER_VERSION: "3.44.8"
