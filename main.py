@@ -299,6 +299,9 @@ class QRVaultApp:
         self._ai_fab_enabled = False
         self._ai_fab_dragging = False
         self._ai_fab_moved = False
+        self._ai_fab_move_mode = False
+        self._ai_fab_btn: ft.Container | None = None
+        self._ai_fab_drag_layer: ft.GestureDetector | None = None
 
         self._scan_busy = False
         self._scan_decode_pending = False
@@ -663,6 +666,8 @@ class QRVaultApp:
     def set_view(self, body: ft.Control, *, ai_fab: bool = False, ai_home: bool = False):
         # Closing the AI sheet on navigation keeps overlays from sticking across screens.
         self._ai_panel_visible = False
+        self._ai_fab_move_mode = False
+        self._ai_fab_dragging = False
         self._ai_fab_enabled = bool(ai_fab and self.session.is_authenticated)
         if not self._ai_fab_enabled:
             new_scope = None
@@ -712,87 +717,16 @@ class QRVaultApp:
             content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.bg, size=28),
             tooltip=self._("ai_fab_tooltip"),
         )
-        drag_origin = {"right": 10.0, "bottom": 18.0}
+        self._ai_fab_btn = btn
 
-        def _style_idle():
-            btn.border = ft.Border.all(2, "#FFFFFF33")
-            btn.shadow = ft.BoxShadow(
-                blur_radius=18,
-                color="#14B8A699",
-                offset=ft.Offset(0, 6),
-            )
-            try:
-                btn.update()
-            except Exception:
-                pass
-
-        def _style_dragging():
-            btn.border = ft.Border.all(3, C.warning)
-            btn.shadow = ft.BoxShadow(
-                blur_radius=26,
-                color="#F59E0B99",
-                offset=ft.Offset(0, 8),
-            )
-            try:
-                btn.update()
-            except Exception:
-                pass
-
-        def _apply_pos(right: float, bottom: float):
-            if not self._ai_fab_host:
-                return
-            right, bottom = self._clamp_ai_fab_pos(right, bottom)
-            self._ai_fab_host.right = right
-            self._ai_fab_host.bottom = bottom
-            try:
-                self._ai_fab_host.update()
-            except Exception:
-                pass
-
-        def on_long_press_start(_e):
-            # Mobile touch: long-press arms drag; move updates come from
-            # on_long_press_move_update (not pan — pan often loses the gesture on APK).
-            self._ai_fab_dragging = True
-            self._ai_fab_moved = False
-            drag_origin["right"] = float(
-                (self._ai_fab_host.right if self._ai_fab_host else None)
-                or self.session.ai_fab_right
-                or 10
-            )
-            drag_origin["bottom"] = float(
-                (self._ai_fab_host.bottom if self._ai_fab_host else None)
-                or self.session.ai_fab_bottom
-                or 18
-            )
-            _style_dragging()
-            self.toast(self._("ai_fab_drag_hint"))
-
-        def on_long_press_move(e):
-            if not self._ai_fab_dragging or not self._ai_fab_host:
-                return
-            offset = getattr(e, "offset_from_origin", None) or getattr(
-                e, "local_offset_from_origin", None
-            )
-            dx = float(getattr(offset, "x", 0) or 0) if offset is not None else 0.0
-            dy = float(getattr(offset, "y", 0) or 0) if offset is not None else 0.0
-            if abs(dx) > 1 or abs(dy) > 1:
-                self._ai_fab_moved = True
-            # Global offset: finger right/down → decrease right/bottom insets.
-            _apply_pos(drag_origin["right"] - dx, drag_origin["bottom"] - dy)
-
-        def on_long_press_end(_e):
-            if not self._ai_fab_dragging:
-                return
-            self._ai_fab_dragging = False
-            _style_idle()
-            if self._ai_fab_host is not None:
-                self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
-                self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
-                self.session.save()
+        def on_long_press(_e):
+            # Sticky move-mode: APK cannot track long-press-drag once the finger
+            # leaves the 58px FAB hit-box, so we open a full-screen touch layer.
+            self._enter_ai_fab_move_mode()
 
         def on_tap(_e):
-            if self._ai_fab_dragging or self._ai_fab_moved:
-                self._ai_fab_moved = False
+            if self._ai_fab_move_mode:
+                self._exit_ai_fab_move_mode(save=True)
                 return
             self._toggle_ai_panel()
 
@@ -800,12 +734,122 @@ class QRVaultApp:
             content=btn,
             mouse_cursor=ft.MouseCursor.MOVE,
             on_tap=on_tap,
-            on_long_press_start=on_long_press_start,
-            on_long_press_move_update=on_long_press_move,
-            on_long_press_end=on_long_press_end,
-            on_long_press_up=on_long_press_end,
-            drag_interval=16,
+            on_long_press_start=on_long_press,
+            on_long_press=on_long_press,
         )
+
+    def _set_ai_fab_btn_style(self, *, moving: bool):
+        btn = self._ai_fab_btn
+        if btn is None:
+            return
+        if moving:
+            btn.border = ft.Border.all(3, C.warning)
+            btn.shadow = ft.BoxShadow(
+                blur_radius=26,
+                color="#F59E0B99",
+                offset=ft.Offset(0, 8),
+            )
+            btn.bgcolor = C.warning
+        else:
+            btn.border = ft.Border.all(2, "#FFFFFF33")
+            btn.shadow = ft.BoxShadow(
+                blur_radius=18,
+                color="#14B8A699",
+                offset=ft.Offset(0, 6),
+            )
+            btn.bgcolor = C.primary
+        try:
+            btn.update()
+        except Exception:
+            pass
+
+    def _enter_ai_fab_move_mode(self):
+        if self._ai_fab_move_mode:
+            return
+        self._ai_fab_move_mode = True
+        self._ai_fab_moved = False
+        self._set_ai_fab_btn_style(moving=True)
+        layer = self._ai_fab_drag_layer
+        if layer is not None:
+            layer.visible = True
+            layer.left = 0
+            layer.top = 0
+            layer.right = 0
+            layer.bottom = 0
+            layer.width = None
+            layer.height = None
+            try:
+                layer.update()
+            except Exception:
+                self.page.update()
+        self.toast(self._("ai_fab_drag_hint"))
+
+    def _exit_ai_fab_move_mode(self, *, save: bool):
+        if not self._ai_fab_move_mode and not self._ai_fab_dragging:
+            return
+        self._ai_fab_move_mode = False
+        self._ai_fab_dragging = False
+        self._set_ai_fab_btn_style(moving=False)
+        layer = self._ai_fab_drag_layer
+        if layer is not None:
+            # Collapse so an invisible full-screen hit-target cannot steal taps on APK.
+            layer.visible = False
+            layer.left = None
+            layer.top = None
+            layer.right = None
+            layer.bottom = None
+            layer.width = 0
+            layer.height = 0
+            try:
+                layer.update()
+            except Exception:
+                pass
+        if save and self._ai_fab_host is not None:
+            self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
+            self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
+            self.session.save()
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _move_ai_fab_to_global(self, gx: float, gy: float):
+        if not self._ai_fab_host:
+            return
+        fab = 58.0
+        pw = float(self.page.width or 400)
+        ph = float(self.page.height or 800)
+        # Place FAB center under the finger.
+        right = pw - gx - (fab / 2)
+        bottom = ph - gy - (fab / 2)
+        right, bottom = self._clamp_ai_fab_pos(right, bottom)
+        self._ai_fab_host.right = right
+        self._ai_fab_host.bottom = bottom
+        self._ai_fab_moved = True
+        try:
+            self._ai_fab_host.update()
+        except Exception:
+            pass
+
+    def _on_ai_fab_drag_update(self, e):
+        if not self._ai_fab_move_mode:
+            return
+        self._ai_fab_dragging = True
+        g = getattr(e, "global_position", None)
+        if g is None:
+            return
+        gx = float(getattr(g, "x", 0) or 0)
+        gy = float(getattr(g, "y", 0) or 0)
+        self._move_ai_fab_to_global(gx, gy)
+
+    def _on_ai_fab_drag_end(self, _e=None):
+        if not self._ai_fab_move_mode:
+            return
+        self._ai_fab_dragging = False
+        if self._ai_fab_host is not None:
+            self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
+            self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
+            self.session.save()
 
     def _clamp_ai_fab_pos(self, right: float, bottom: float) -> tuple[float, float]:
         fab = 58.0
@@ -945,9 +989,43 @@ class QRVaultApp:
             right=right,
             bottom=bottom,
         )
+        # Full-screen touch catcher used only while sticky move-mode is active.
+        # Must sit above the page content so pan keeps working outside the 58px FAB.
+        drag_layer = ft.GestureDetector(
+            visible=False,
+            left=0,
+            top=0,
+            right=0,
+            bottom=0,
+            content=ft.Container(
+                expand=True,
+                bgcolor="#33000000",
+                alignment=ft.Alignment.TOP_CENTER,
+                padding=ft.Padding.only(top=48),
+                content=ft.Container(
+                    bgcolor="#CC0F172A",
+                    border_radius=20,
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                    content=ft.Text(
+                        self._("ai_fab_move_banner"),
+                        color=C.text,
+                        size=13,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ),
+            ),
+            on_pan_start=self._on_ai_fab_drag_update,
+            on_pan_update=self._on_ai_fab_drag_update,
+            on_pan_end=self._on_ai_fab_drag_end,
+            on_tap=lambda e: self._exit_ai_fab_move_mode(save=True),
+            drag_interval=16,
+        )
         self._ai_sheet_host = sheet_host
         self._ai_fab_host = fab_host
-        return [sheet_host, fab_host]
+        self._ai_fab_drag_layer = drag_layer
+        # Order: sheet, drag catcher, FAB on top visually when not moving;
+        # when moving, drag_layer is visible and covers FAB hit-testing intentionally.
+        return [sheet_host, fab_host, drag_layer]
 
     def _ai_bubble(self, role: str, text: str) -> ft.Control:
         mine = role == "user"

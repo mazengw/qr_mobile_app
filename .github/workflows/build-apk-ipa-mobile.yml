@@ -13,10 +13,9 @@ on:
 
 env:
   # https://flet.dev/docs/publish#versioning
-  # 1.1.0 — AI Agent FAB (floating, long-press-drag via touch long_press_move_update),
-  # join QR share, storage AI chat APIs consumed by mobile.
-  BUILD_NUMBER: 2
-  BUILD_VERSION: 1.1.0
+  # 1.1.1 — AI FAB sticky move-mode with full-screen touch pan layer (APK fix)
+  BUILD_NUMBER: 3
+  BUILD_VERSION: 1.1.1
   PYTHON_VERSION: 3.12.2
   # Matches flet 0.86.x (your venv requires 3.44.8)
   FLUTTER_VERSION: "3.44.8"
