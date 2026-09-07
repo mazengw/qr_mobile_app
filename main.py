@@ -712,48 +712,9 @@ class QRVaultApp:
             content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.bg, size=28),
             tooltip=self._("ai_fab_tooltip"),
         )
+        drag_origin = {"right": 10.0, "bottom": 18.0}
 
-        def on_long_press(_e):
-            self._ai_fab_dragging = True
-            self._ai_fab_moved = False
-            btn.border = ft.Border.all(3, C.warning)
-            btn.shadow = ft.BoxShadow(
-                blur_radius=26,
-                color="#F59E0B99",
-                offset=ft.Offset(0, 8),
-            )
-            try:
-                btn.update()
-            except Exception:
-                pass
-            self.toast(self._("ai_fab_drag_hint"))
-
-        def on_pan_update(e: ft.DragUpdateEvent):
-            if not self._ai_fab_dragging or not self._ai_fab_host:
-                return
-            delta = getattr(e, "local_delta", None)
-            if delta is not None:
-                dx = float(getattr(delta, "x", 0) or 0)
-                dy = float(getattr(delta, "y", 0) or 0)
-            else:
-                dx = float(getattr(e, "delta_x", 0) or 0)
-                dy = float(getattr(e, "delta_y", 0) or 0)
-            if abs(dx) > 0.5 or abs(dy) > 0.5:
-                self._ai_fab_moved = True
-            right = float(self._ai_fab_host.right or self.session.ai_fab_right or 10) - dx
-            bottom = float(self._ai_fab_host.bottom or self.session.ai_fab_bottom or 18) - dy
-            right, bottom = self._clamp_ai_fab_pos(right, bottom)
-            self._ai_fab_host.right = right
-            self._ai_fab_host.bottom = bottom
-            try:
-                self._ai_fab_host.update()
-            except Exception:
-                pass
-
-        def on_pan_end(_e):
-            if not self._ai_fab_dragging:
-                return
-            self._ai_fab_dragging = False
+        def _style_idle():
             btn.border = ft.Border.all(2, "#FFFFFF33")
             btn.shadow = ft.BoxShadow(
                 blur_radius=18,
@@ -764,6 +725,66 @@ class QRVaultApp:
                 btn.update()
             except Exception:
                 pass
+
+        def _style_dragging():
+            btn.border = ft.Border.all(3, C.warning)
+            btn.shadow = ft.BoxShadow(
+                blur_radius=26,
+                color="#F59E0B99",
+                offset=ft.Offset(0, 8),
+            )
+            try:
+                btn.update()
+            except Exception:
+                pass
+
+        def _apply_pos(right: float, bottom: float):
+            if not self._ai_fab_host:
+                return
+            right, bottom = self._clamp_ai_fab_pos(right, bottom)
+            self._ai_fab_host.right = right
+            self._ai_fab_host.bottom = bottom
+            try:
+                self._ai_fab_host.update()
+            except Exception:
+                pass
+
+        def on_long_press_start(_e):
+            # Mobile touch: long-press arms drag; move updates come from
+            # on_long_press_move_update (not pan — pan often loses the gesture on APK).
+            self._ai_fab_dragging = True
+            self._ai_fab_moved = False
+            drag_origin["right"] = float(
+                (self._ai_fab_host.right if self._ai_fab_host else None)
+                or self.session.ai_fab_right
+                or 10
+            )
+            drag_origin["bottom"] = float(
+                (self._ai_fab_host.bottom if self._ai_fab_host else None)
+                or self.session.ai_fab_bottom
+                or 18
+            )
+            _style_dragging()
+            self.toast(self._("ai_fab_drag_hint"))
+
+        def on_long_press_move(e):
+            if not self._ai_fab_dragging or not self._ai_fab_host:
+                return
+            offset = getattr(e, "offset_from_origin", None) or getattr(
+                e, "local_offset_from_origin", None
+            )
+            dx = float(getattr(offset, "x", 0) or 0) if offset is not None else 0.0
+            dy = float(getattr(offset, "y", 0) or 0) if offset is not None else 0.0
+            if abs(dx) > 1 or abs(dy) > 1:
+                self._ai_fab_moved = True
+            # Global offset: finger right/down → decrease right/bottom insets.
+            _apply_pos(drag_origin["right"] - dx, drag_origin["bottom"] - dy)
+
+        def on_long_press_end(_e):
+            if not self._ai_fab_dragging:
+                return
+            self._ai_fab_dragging = False
+            _style_idle()
             if self._ai_fab_host is not None:
                 self.session.ai_fab_right = float(self._ai_fab_host.right or 10)
                 self.session.ai_fab_bottom = float(self._ai_fab_host.bottom or 18)
@@ -777,10 +798,12 @@ class QRVaultApp:
 
         return ft.GestureDetector(
             content=btn,
-            on_long_press_start=on_long_press,
-            on_pan_update=on_pan_update,
-            on_pan_end=on_pan_end,
+            mouse_cursor=ft.MouseCursor.MOVE,
             on_tap=on_tap,
+            on_long_press_start=on_long_press_start,
+            on_long_press_move_update=on_long_press_move,
+            on_long_press_end=on_long_press_end,
+            on_long_press_up=on_long_press_end,
             drag_interval=16,
         )
 
