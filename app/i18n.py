@@ -117,6 +117,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "photo_selected": {"en": "Photo selected", "ar": "تم اختيار الصورة"},
     "language": {"en": "Language", "ar": "اللغة"},
+    "theme": {"en": "Appearance", "ar": "المظهر"},
+    "theme_light": {"en": "Light mode", "ar": "الوضع الفاتح"},
+    "theme_dark": {"en": "Dark mode", "ar": "الوضع الداكن"},
+    "theme_switch_to_light": {"en": "Light", "ar": "فاتح"},
+    "theme_switch_to_dark": {"en": "Dark", "ar": "داكن"},
     "enter_phone": {
         "en": "Enter a valid phone number (at least 8 digits).",
         "ar": "أدخل رقم هاتف صالحاً (8 أرقام على الأقل).",

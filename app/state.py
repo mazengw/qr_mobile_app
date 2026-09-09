@@ -17,6 +17,7 @@ class Session:
         self.user: dict[str, Any] | None = None
         self.base_url: str = "http://127.0.0.1:8000"
         self.lang: str = "en"
+        self.theme: str = "dark"
         self.ai_fab_right: float = 10.0
         self.ai_fab_bottom: float = 18.0
         self.load()
@@ -35,6 +36,8 @@ class Session:
             self.user = data.get("user")
             self.base_url = data.get("base_url") or self.base_url
             self.lang = data.get("lang") or self.lang
+            raw_theme = str(data.get("theme") or self.theme).strip().lower()
+            self.theme = "light" if raw_theme == "light" else "dark"
             try:
                 self.ai_fab_right = float(data.get("ai_fab_right", self.ai_fab_right))
             except (TypeError, ValueError):
@@ -56,6 +59,7 @@ class Session:
                     "user": self.user,
                     "base_url": self.base_url,
                     "lang": self.lang,
+                    "theme": "light" if self.theme == "light" else "dark",
                     "ai_fab_right": self.ai_fab_right,
                     "ai_fab_bottom": self.ai_fab_bottom,
                 },

@@ -45,7 +45,20 @@ from app.paths import downloads_dir
 from app.pdf_viewer_html import can_serve_pdf, prepare_pdf_viewer_dir, start_pdf_viewer_server
 from app.qr_decode import decode_qr_payload
 from app.state import Session
-from app.theme import C, card, chip, ghost_button, muted, page_theme, primary_button, section_title
+from app.theme import (
+    C,
+    THEME_LIGHT,
+    apply_theme,
+    card,
+    chip,
+    flet_theme_mode,
+    ghost_button,
+    muted,
+    normalize_theme,
+    page_theme,
+    primary_button,
+    section_title,
+)
 
 try:
     import flet_camera as fc
@@ -357,6 +370,32 @@ class QRVaultApp:
         label = self._("lang_switch_to_en") if normalize_lang(self.session.lang) == LANG_AR else self._("lang_switch_to_ar")
         return ghost_button(label, self._toggle_language, ft.Icons.TRANSLATE)
 
+    def _apply_theme(self):
+        mode = apply_theme(getattr(self.session, "theme", "dark"))
+        self.session.theme = mode
+        self.page.theme = page_theme()
+        self.page.theme_mode = flet_theme_mode()
+        self.page.bgcolor = C.bg
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _toggle_theme(self, _=None):
+        self.session.theme = "dark" if normalize_theme(self.session.theme) == THEME_LIGHT else THEME_LIGHT
+        self.session.save()
+        self._apply_theme()
+        if self.session.is_authenticated:
+            self.go_home()
+        else:
+            self.go_login()
+
+    def _theme_button(self) -> ft.Control:
+        is_light = normalize_theme(self.session.theme) == THEME_LIGHT
+        label = self._("theme_switch_to_dark") if is_light else self._("theme_switch_to_light")
+        icon = ft.Icons.DARK_MODE_OUTLINED if is_light else ft.Icons.LIGHT_MODE_OUTLINED
+        return ghost_button(label, self._toggle_theme, icon)
+
     def _auth_error_message(self, exc: BaseException) -> str:
         """Map auth/network failures to clear localized user messages."""
         if isinstance(exc, ApiError):
@@ -567,9 +606,7 @@ class QRVaultApp:
 
     def _configure_page(self):
         self.page.title = "QR Vault"
-        self.page.theme = page_theme()
-        self.page.theme_mode = ft.ThemeMode.DARK
-        self.page.bgcolor = C.bg
+        self._apply_theme()
         self.page.padding = 0
         self.page.window.width = 420
         self.page.window.height = 860
@@ -652,8 +689,13 @@ class QRVaultApp:
             return
         # Flet 0.86+: SnackBar is a dialog — overlay.open no longer shows reliably.
         bar = ft.SnackBar(
-            content=ft.Text(msg, color=C.text, size=13),
-            bgcolor=C.danger if error else C.surface_alt,
+            content=ft.Text(
+                msg,
+                color="#FFFFFF" if error else C.text,
+                size=13,
+                weight=ft.FontWeight.W_600,
+            ),
+            bgcolor=C.danger if error else C.surface,
             show_close_icon=True,
             behavior=ft.SnackBarBehavior.FLOATING,
             duration=ft.Duration(milliseconds=5000),
@@ -699,7 +741,7 @@ class QRVaultApp:
             gradient=ft.LinearGradient(
                 begin=ft.Alignment.TOP_LEFT,
                 end=ft.Alignment.BOTTOM_RIGHT,
-                colors=["#0B1220", "#0F172A", "#042F2E"],
+                colors=list(C.gradient),
             ),
         )
         self.page.update()
@@ -719,7 +761,7 @@ class QRVaultApp:
                 offset=ft.Offset(0, 6),
             ),
             border=ft.Border.all(2, "#FFFFFF33"),
-            content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.bg, size=28),
+            content=ft.Icon(ft.Icons.AUTO_AWESOME, color=C.on_primary, size=28),
         )
         self._ai_fab_btn = btn
         armed = {"value": False}
@@ -937,11 +979,11 @@ class QRVaultApp:
         sheet_card = ft.Container(
             width=360,
             height=430,
-            bgcolor="#E6121A2B",
+            bgcolor=C.surface,
             border=ft.Border.all(1, C.border),
             border_radius=20,
             padding=14,
-            shadow=ft.BoxShadow(blur_radius=24, color="#00000066", offset=ft.Offset(0, 8)),
+            shadow=ft.BoxShadow(blur_radius=24, color=C.shadow, offset=ft.Offset(0, 8)),
             content=ft.Column(
                 [
                     ft.Row(
@@ -1017,7 +1059,7 @@ class QRVaultApp:
             top=0,
             right=0,
             bottom=0,
-            bgcolor="#55000000",
+            bgcolor=C.scrim,
             alignment=ft.Alignment.BOTTOM_RIGHT,
             padding=ft.Padding.only(left=16, right=16, bottom=84, top=40),
             content=sheet_card,
@@ -1040,17 +1082,24 @@ class QRVaultApp:
         drag_gesture = ft.GestureDetector(
             content=ft.Container(
                 expand=True,
-                bgcolor="#66000000",
+                bgcolor=C.scrim,
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.Padding.only(top=40),
                 content=ft.Container(
-                    bgcolor="#E60F172A",
+                    bgcolor=C.surface,
+                    border=ft.Border.all(1, C.border),
                     border_radius=18,
                     padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                    shadow=ft.BoxShadow(
+                        blur_radius=16,
+                        color=C.shadow,
+                        offset=ft.Offset(0, 4),
+                    ),
                     content=ft.Text(
                         self._("ai_fab_move_banner"),
                         color=C.text,
                         size=13,
+                        weight=ft.FontWeight.W_600,
                         text_align=ft.TextAlign.CENTER,
                     ),
                 ),
@@ -1332,7 +1381,7 @@ class QRVaultApp:
         self.set_view(
             ft.Column(
                 [
-                    ft.Row([ft.Container(expand=True), self._lang_button()]),
+                    ft.Row([ft.Container(expand=True), self._theme_button(), self._lang_button()], spacing=8),
                     ft.Container(height=8),
                     ft.Row(
                         [
@@ -1514,8 +1563,10 @@ class QRVaultApp:
                                 on_click=self._request_back,
                             ),
                             ft.Container(expand=True),
+                            self._theme_button(),
                             self._lang_button(),
-                        ]
+                        ],
+                        spacing=8,
                     ),
                     ft.Row(
                         [
@@ -1754,6 +1805,15 @@ class QRVaultApp:
                     ft.Icons.TRANSLATE,
                     self._("language"),
                     after_close(lambda: self._toggle_language()),
+                ),
+                tile(
+                    ft.Icons.DARK_MODE_OUTLINED
+                    if normalize_theme(self.session.theme) == THEME_LIGHT
+                    else ft.Icons.LIGHT_MODE_OUTLINED,
+                    self._("theme_dark")
+                    if normalize_theme(self.session.theme) == THEME_LIGHT
+                    else self._("theme_light"),
+                    after_close(lambda: self._toggle_theme()),
                 ),
                 tile(
                     ft.Icons.HELP_OUTLINE,
@@ -3394,13 +3454,13 @@ class QRVaultApp:
                 inner = ft.Icon(
                     fallback_icon,
                     size=min(34, max(18, h // 3)),
-                    color="#FFFFFF88",
+                    color=C.image_placeholder_icon,
                 )
             box = ft.Container(
                 content=inner,
                 width=None,
                 height=h,
-                bgcolor="#0B1220",
+                bgcolor=C.image_placeholder,
                 border_radius=radius,
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 alignment=ft.Alignment.CENTER,
@@ -3415,7 +3475,7 @@ class QRVaultApp:
             inner = ft.Icon(
                 fallback_icon,
                 size=min(34, max(18, h // 3)),
-                color="#FFFFFF88",
+                color=C.image_placeholder_icon,
             )
         shell = ft.Container(
             content=inner,
@@ -3429,7 +3489,7 @@ class QRVaultApp:
             content=shell,
             width=thumb_w,
             height=h,
-            bgcolor="#0B1220",
+            bgcolor=C.image_placeholder,
             border_radius=radius,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             padding=0,
