@@ -13,11 +13,12 @@ _STRINGS: dict[str, dict[str, str]] = {
     "signed_in_as": {"en": "Signed in as", "ar": "مسجّل كـ"},
     "sign_out": {"en": "Sign out", "ar": "خروج"},
     "your_vaults": {
-        "en": "Your vaults — long-press an item to reorder",
-        "ar": "خزائنك — اضغط مطولاً على عنصر لإعادة الترتيب",
+        "en": "Long-press to reorder · Pull down to refresh",
+        "ar": "اضغط مطولاً للترتيب · اسحب للأسفل للتحديث",
     },
     "scan_qr": {"en": "Scan QR", "ar": "مسح QR"},
     "refresh": {"en": "Refresh", "ar": "تحديث"},
+    "home_refreshed": {"en": "List updated", "ar": "تم تحديث القائمة"},
     "help": {"en": "Help", "ar": "مساعدة"},
     "offline_home_banner": {
         "en": "Offline — showing cached vault list. Open a vault to browse saved files and notes.",

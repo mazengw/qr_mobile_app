@@ -299,6 +299,9 @@ class QRVaultApp:
         self._home_visible_ids: list[int] = []
         self._home_invites: ft.Column | None = None
         self._home_offline_banner: ft.Container | None = None
+        self._home_pull_indicator: ft.Container | None = None
+        self._home_refreshing = False
+        self._home_pull_distance = 0.0
         self._storage_files_cache: list[dict] = []
         self._storage_notes_cache: list[dict] = []
         self._vault_visible_items: list[dict] = []
@@ -1999,6 +2002,9 @@ class QRVaultApp:
     def go_home(self):
         self._set_back(None)
         self._ensure_profile_drawer()
+        self._home_refreshing = False
+        self._home_pull_distance = 0.0
+
         list_view = ft.ReorderableListView(
             expand=True,
             spacing=0,
@@ -2006,6 +2012,8 @@ class QRVaultApp:
             # Mobile: long-press item to drag. Desktop: small overlay handle (no layout width).
             show_default_drag_handles=True,
             on_reorder=self._on_home_reorder,
+            on_scroll=self._on_home_scroll,
+            scroll_interval=40,
         )
         self._home_list = list_view
         filter_row = ft.Row(spacing=8, visible=False)
@@ -2021,19 +2029,43 @@ class QRVaultApp:
         header = ft.Row(
             [
                 avatar_btn,
-                ft.Container(expand=True),
-                ghost_button(self._("help"), lambda e: self._show_help(), ft.Icons.HELP_OUTLINE),
+                ft.Column(
+                    [
+                        ft.Text(
+                            "QR Vault",
+                            size=20,
+                            weight=ft.FontWeight.BOLD,
+                            color=C.text,
+                        ),
+                        ft.Text(
+                            self._("your_vaults"),
+                            size=12,
+                            color=C.text_muted,
+                        ),
+                    ],
+                    spacing=2,
+                    expand=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
             ],
+            spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        actions = ft.Row(
-            [
-                primary_button(self._("scan_qr"), lambda e: self.go_scan(), ft.Icons.QR_CODE_SCANNER, expand=True),
-                ghost_button(self._("refresh"), lambda e: self.page.run_task(self._refresh_home, list_view)),
-            ],
-            spacing=10,
+        pull_indicator = ft.Container(
+            height=0,
+            visible=False,
+            alignment=ft.Alignment.CENTER,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            animate=ft.Animation(160, ft.AnimationCurve.EASE_OUT),
+            content=ft.ProgressRing(
+                width=22,
+                height=22,
+                color=C.primary,
+                stroke_width=2.5,
+            ),
         )
+        self._home_pull_indicator = pull_indicator
 
         invites = ft.Column(spacing=8, visible=False)
         self._home_invites = invites
@@ -2044,11 +2076,20 @@ class QRVaultApp:
             ft.Column(
                 [
                     header,
-                    muted(self._("your_vaults")),
-                    actions,
+                    ft.Row(
+                        [
+                            primary_button(
+                                self._("scan_qr"),
+                                lambda e: self.go_scan(),
+                                ft.Icons.QR_CODE_SCANNER,
+                                expand=True,
+                            ),
+                        ],
+                    ),
                     offline_banner,
                     invites,
                     filter_row,
+                    pull_indicator,
                     ft.Container(content=list_view, expand=True),
                 ],
                 spacing=14,
@@ -2058,6 +2099,69 @@ class QRVaultApp:
             ai_home=True,
         )
         self.page.run_task(self._refresh_home, list_view)
+
+    def _update_home_pull_indicator(self, distance: float):
+        ind = self._home_pull_indicator
+        if ind is None:
+            return
+        if self._home_refreshing:
+            height = 44.0
+        else:
+            height = max(0.0, min(56.0, float(distance or 0)))
+        ind.height = height
+        ind.visible = height > 6 or self._home_refreshing
+        try:
+            ind.update()
+        except Exception:
+            pass
+
+    def _on_home_scroll(self, e: ft.OnScrollEvent):
+        if self._home_refreshing:
+            return
+        pixels = float(getattr(e, "pixels", 0) or 0)
+        overscroll = float(getattr(e, "overscroll", 0) or 0)
+        event_type = getattr(e, "event_type", None)
+        at_top = pixels <= 0.8
+
+        if event_type == ft.ScrollType.OVERSCROLL and at_top and overscroll > 0:
+            self._home_pull_distance = max(self._home_pull_distance, overscroll)
+            self._update_home_pull_indicator(self._home_pull_distance)
+            return
+
+        if event_type == ft.ScrollType.UPDATE and at_top and overscroll > 0:
+            self._home_pull_distance = overscroll
+            self._update_home_pull_indicator(overscroll)
+            return
+
+        if event_type == ft.ScrollType.END:
+            if at_top and self._home_pull_distance >= 64:
+                self.page.run_task(self._pull_refresh_home)
+            else:
+                self._home_pull_distance = 0.0
+                self._update_home_pull_indicator(0)
+            return
+
+        if pixels > 2:
+            if self._home_pull_distance:
+                self._home_pull_distance = 0.0
+                self._update_home_pull_indicator(0)
+
+    async def _pull_refresh_home(self):
+        if self._home_refreshing:
+            return
+        list_view = self._home_list
+        if list_view is None:
+            return
+        self._home_refreshing = True
+        self._home_pull_distance = 0.0
+        self._update_home_pull_indicator(44)
+        try:
+            await self._refresh_home(list_view)
+            self.toast(self._("home_refreshed"))
+        finally:
+            self._home_refreshing = False
+            self._home_pull_distance = 0.0
+            self._update_home_pull_indicator(0)
 
     def _logout(self, _):
         try:
