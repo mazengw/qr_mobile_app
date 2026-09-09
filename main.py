@@ -324,6 +324,10 @@ class QRVaultApp:
         self._scan_last_decode = 0.0
         self._scan_status: ft.Text | None = None
         self._scan_qr_field: ft.TextField | None = None
+        self._scan_line: ft.Container | None = None
+        self._scan_line_active = False
+        self._scan_center_hint: ft.Container | None = None
+        self._scan_viewfinder_size = 300
         self._pdf_server = None  # local HTTP server for official PDF.js viewer
         self._pending_register_avatar: Path | None = None
         self._auth_error_text: ft.Text | None = None
@@ -708,7 +712,7 @@ class QRVaultApp:
             except Exception:
                 pass
 
-    def set_view(self, body: ft.Control, *, ai_fab: bool = False, ai_home: bool = False):
+    def set_view(self, body: ft.Control, *, ai_fab: bool = False, ai_home: bool = False, immersive: bool = False):
         # Closing the AI sheet on navigation keeps overlays from sticking across screens.
         self._ai_panel_visible = False
         self._ai_fab_move_mode = False
@@ -723,11 +727,17 @@ class QRVaultApp:
         if new_scope != self._ai_scope_storage_id:
             self._ai_history = []
         self._ai_scope_storage_id = new_scope
+        pad = (
+            ft.Padding.all(0)
+            if immersive
+            else ft.Padding.only(left=18, right=18, top=12, bottom=8)
+        )
         padded = ft.SafeArea(
             content=ft.Container(
                 content=body,
                 expand=True,
-                padding=ft.Padding.only(left=18, right=18, top=12, bottom=8),
+                padding=pad,
+                bgcolor=C.bg if immersive else None,
             ),
             expand=True,
             maintain_bottom_view_padding=True,
@@ -738,11 +748,14 @@ class QRVaultApp:
         self.root.content = ft.Container(
             content=ft.Stack(layers, expand=True),
             expand=True,
-            gradient=ft.LinearGradient(
+            gradient=None
+            if immersive
+            else ft.LinearGradient(
                 begin=ft.Alignment.TOP_LEFT,
                 end=ft.Alignment.BOTTOM_RIGHT,
                 colors=list(C.gradient),
             ),
+            bgcolor=C.bg if immersive else None,
         )
         self.page.update()
 
@@ -1862,7 +1875,6 @@ class QRVaultApp:
         src = self._avatar_display_src()
         has_photo = bool(src)
         preview_size = 220.0
-
         if has_photo:
             preview: ft.Control = ft.Container(
                 content=ft.Image(
@@ -2427,12 +2439,163 @@ class QRVaultApp:
         except Exception:
             return False
 
+    def _scan_corner(self, *, top: bool, left: bool) -> ft.Container:
+        side = ft.BorderSide(3.5, C.primary)
+        return ft.Container(
+            width=34,
+            height=34,
+            border=ft.Border(
+                top=side if top else None,
+                bottom=side if not top else None,
+                left=side if left else None,
+                right=side if not left else None,
+            ),
+        )
+
+    def _build_scan_overlay(self) -> ft.Control:
+        size = self._scan_viewfinder_size
+        line = ft.Container(
+            height=2,
+            left=10,
+            right=10,
+            top=24,
+            border_radius=2,
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment.CENTER_LEFT,
+                end=ft.Alignment.CENTER_RIGHT,
+                colors=["#0014B8A6", C.primary, "#0014B8A6"],
+            ),
+            shadow=ft.BoxShadow(
+                blur_radius=14,
+                spread_radius=1,
+                color="#14B8A6AA",
+                offset=ft.Offset(0, 0),
+            ),
+            animate_position=ft.Animation(1100, ft.AnimationCurve.EASE_IN_OUT),
+        )
+        self._scan_line = line
+
+        hint = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.QR_CODE_2, size=56, color=C.primary),
+                        width=96,
+                        height=96,
+                        bgcolor=C.surface,
+                        border_radius=28,
+                        alignment=ft.Alignment.CENTER,
+                        border=ft.Border.all(1, C.border),
+                        shadow=ft.BoxShadow(
+                            blur_radius=24,
+                            color=C.shadow,
+                            offset=ft.Offset(0, 8),
+                        ),
+                    ),
+                    ft.Text(
+                        self._("paste_qr")
+                        if not self._camera_platform_ok()
+                        else self._("preparing_camera"),
+                        color="#F8FAFC",
+                        size=14,
+                        weight=ft.FontWeight.W_600,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                spacing=14,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+            ),
+            alignment=ft.Alignment.CENTER,
+        )
+        self._scan_center_hint = hint
+
+        viewfinder = ft.Container(
+            width=size,
+            height=size,
+            content=ft.Stack(
+                [
+                    ft.Container(content=self._scan_corner(top=True, left=True), left=0, top=0),
+                    ft.Container(content=self._scan_corner(top=True, left=False), right=0, top=0),
+                    ft.Container(content=self._scan_corner(top=False, left=True), left=0, bottom=0),
+                    ft.Container(content=self._scan_corner(top=False, left=False), right=0, bottom=0),
+                    line,
+                ],
+                expand=True,
+            ),
+        )
+
+        return ft.Stack(
+            [
+                # Soft vignette so the frame reads as a modern scanner.
+                ft.Container(
+                    expand=True,
+                    gradient=ft.LinearGradient(
+                        begin=ft.Alignment.TOP_CENTER,
+                        end=ft.Alignment.BOTTOM_CENTER,
+                        colors=["#99000000", "#22000000", "#99000000"],
+                    ),
+                ),
+                ft.Container(expand=True, alignment=ft.Alignment.CENTER, content=viewfinder),
+                ft.Container(expand=True, alignment=ft.Alignment.CENTER, content=hint),
+            ],
+            expand=True,
+        )
+
+    def _set_scan_center_hint(self, message: str | None, *, icon=None, visible: bool = True):
+        hint = self._scan_center_hint
+        if hint is None:
+            return
+        hint.visible = visible
+        if visible and message is not None:
+            col = hint.content
+            if isinstance(col, ft.Column) and len(col.controls) >= 2:
+                icon_box = col.controls[0]
+                if isinstance(icon_box, ft.Container) and icon is not None:
+                    icon_box.content = ft.Icon(icon, size=56, color=C.primary)
+                text = col.controls[1]
+                if isinstance(text, ft.Text):
+                    text.value = message
+        try:
+            hint.update()
+        except Exception:
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    def _start_scan_line_animation(self):
+        self._scan_line_active = True
+        self.page.run_task(self._run_scan_line_animation)
+
+    async def _run_scan_line_animation(self):
+        line = self._scan_line
+        if line is None:
+            return
+        top_min = 18.0
+        top_max = float(self._scan_viewfinder_size - 22)
+        going_down = True
+        while self._scan_line_active and self._scan_line is line:
+            line.top = top_max if going_down else top_min
+            going_down = not going_down
+            try:
+                line.update()
+            except Exception:
+                break
+            await asyncio.sleep(1.15)
+
+    def _stop_scan_line_animation(self):
+        self._scan_line_active = False
+        self._scan_line = None
+
     def go_scan(self):
         def leave_scan(_e=None):
+            self._stop_scan_line_animation()
             self.page.run_task(self._stop_scan_camera)
             self.go_home()
 
         self._set_back(leave_scan)
+        self._stop_scan_line_animation()
         self.page.run_task(self._stop_scan_camera)
         self._scan_busy = False
         self._scan_decode_pending = False
@@ -2442,37 +2605,36 @@ class QRVaultApp:
             label=self._("qr_value"),
             hint_text=self._("qr_hint"),
             prefix_icon=ft.Icons.QR_CODE_2,
-            border_radius=14,
-            bgcolor=C.surface,
+            border_radius=16,
+            bgcolor=C.surface_alt,
             border_color=C.border,
             focused_border_color=C.primary,
             color=C.text,
             autofocus=not self._camera_platform_ok(),
+            text_size=14,
         )
         self._scan_qr_field = qr
-        status = muted(
+        status = ft.Text(
             self._("scan_status_ready")
             if self._camera_platform_ok()
-            else self._("scan_status_desktop")
+            else self._("scan_status_desktop"),
+            color=C.text_muted,
+            size=12,
+            text_align=ft.TextAlign.CENTER,
         )
         self._scan_status = status
 
         camera_host = ft.Container(
-            content=ft.Column(
-                [
-                    ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
-                    muted(self._("preparing_camera")),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
-            ),
-            height=280,
-            bgcolor=C.surface_alt,
-            border_radius=16,
-            padding=12,
-            border=ft.Border.all(1, C.border),
+            expand=True,
+            bgcolor="#050B14",
             alignment=ft.Alignment.CENTER,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            content=ft.Container(),  # filled by camera / kept empty under overlay hint
+        )
+        overlay = self._build_scan_overlay()
+        scanner = ft.Stack(
+            [camera_host, overlay],
+            expand=True,
         )
 
         def submit(_):
@@ -2484,58 +2646,75 @@ class QRVaultApp:
         def capture(_):
             self.page.run_task(self._capture_scan_frame)
 
-        actions = [
+        action_row: list[ft.Control] = [
             primary_button(self._("open_storage"), submit, ft.Icons.LOCK_OPEN_OUTLINED),
         ]
         if self._camera_platform_ok():
-            actions.insert(
+            action_row.insert(
                 0,
-                ghost_button(self._("capture_frame"), capture, ft.Icons.CAMERA_ALT),
+                ghost_button(self._("capture_frame"), capture, ft.Icons.CAMERA_ALT, expand=True),
             )
 
-        self.set_view(
-            ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.IconButton(ft.Icons.ARROW_BACK, icon_color=C.text, on_click=self._request_back),
-                            section_title(self._("scan_title")),
-                            ft.Container(expand=True),
-                            self._info_button("scan_help_tooltip", "scan_title"),
-                        ]
-                    ),
-                    card(
-                        ft.Column(
-                            [
-                                camera_host,
-                                status,
-                                qr,
-                                *actions,
-                            ],
-                            spacing=14,
-                        )
-                    ),
-                ],
-                spacing=14,
-                expand=True,
-                scroll=ft.ScrollMode.AUTO,
-            )
+        bottom_panel = ft.Container(
+            padding=ft.Padding.only(left=16, right=16, bottom=12, top=10),
+            content=ft.Container(
+                bgcolor=C.surface,
+                border=ft.Border.all(1, C.border),
+                border_radius=22,
+                padding=14,
+                shadow=ft.BoxShadow(
+                    blur_radius=28,
+                    color=C.shadow,
+                    offset=ft.Offset(0, -4),
+                ),
+                content=ft.Column(
+                    [
+                        status,
+                        qr,
+                        ft.Row(action_row, spacing=10) if len(action_row) > 1 else action_row[0],
+                    ],
+                    spacing=12,
+                    tight=True,
+                ),
+            ),
         )
+
+        body = ft.Column(
+            [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                    content=ft.Row(
+                        [
+                            ft.IconButton(
+                                ft.Icons.ARROW_BACK,
+                                icon_color=C.text,
+                                on_click=self._request_back,
+                            ),
+                            ft.Text(
+                                self._("scan_title"),
+                                size=18,
+                                weight=ft.FontWeight.BOLD,
+                                color=C.text,
+                                expand=True,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                            self._info_button("scan_help_tooltip", "scan_title"),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ),
+                ft.Container(content=scanner, expand=True),
+                bottom_panel,
+            ],
+            spacing=0,
+            expand=True,
+        )
+        self.set_view(body, immersive=True)
+        self._start_scan_line_animation()
         if self._camera_platform_ok():
             self.page.run_task(self._start_scan_camera, camera_host)
         else:
-            camera_host.content = ft.Column(
-                [
-                    ft.Icon(ft.Icons.QR_CODE_SCANNER, size=64, color=C.primary),
-                    muted(self._("paste_qr")),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
-            )
-            try:
-                camera_host.update()
-            except Exception:
-                self.page.update()
+            self._set_scan_center_hint(self._("paste_qr"), icon=ft.Icons.QR_CODE_2)
 
     async def _stop_scan_camera(self):
         cam = self._scan_camera
@@ -2593,21 +2772,14 @@ class QRVaultApp:
 
     async def _start_scan_camera(self, camera_host: ft.Container):
         if fc is None:
-            self._set_scan_status("Camera package missing — paste QR value below")
+            self._set_scan_status(self._("paste_qr"))
+            self._set_scan_center_hint(self._("paste_qr"), icon=ft.Icons.QR_CODE_2)
             return
         if not await self._request_camera_permission():
-            camera_host.content = ft.Column(
-                [
-                    ft.Icon(ft.Icons.NO_PHOTOGRAPHY, size=56, color=C.warning),
-                    muted("Camera permission denied — paste QR value below"),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+            self._set_scan_center_hint(
+                self._("paste_qr"),
+                icon=ft.Icons.NO_PHOTOGRAPHY,
             )
-            try:
-                camera_host.update()
-            except Exception:
-                self.page.update()
             return
 
         async def on_frame(e):
@@ -2645,28 +2817,27 @@ class QRVaultApp:
                 streaming = bool(await camera.supports_image_streaming())
             except Exception:
                 streaming = False
+            # Live preview — hide center placeholder; keep corners + laser.
+            self._set_scan_center_hint(None, visible=False)
             if streaming:
                 await camera.start_image_stream()
-                self._set_scan_status("Point camera at a QR code")
+                self._set_scan_status(self._("point_camera"))
             else:
-                self._set_scan_status("Tap Capture frame, or paste QR value below")
+                self._set_scan_status(self._("scan_status_ready"))
                 self.page.run_task(self._poll_scan_frames)
         except Exception as exc:
             self._scan_camera = None
-            camera_host.content = ft.Column(
-                [
-                    ft.Icon(ft.Icons.NO_PHOTOGRAPHY, size=56, color=C.danger),
-                    muted(f"Camera unavailable: {exc}"),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
-            )
-            camera_host.padding = 12
+            camera_host.content = ft.Container()
             try:
                 camera_host.update()
             except Exception:
                 self.page.update()
-            self._set_scan_status("Paste or type the QR payload below")
+            self._set_scan_center_hint(
+                f"{self._('paste_qr')}",
+                icon=ft.Icons.NO_PHOTOGRAPHY,
+            )
+            self._set_scan_status(self._("paste_qr"))
+            self.toast(str(exc), error=True)
 
     async def _poll_scan_frames(self):
         """Fallback when live image streaming is unavailable."""
@@ -2718,6 +2889,7 @@ class QRVaultApp:
             return
         self._scan_busy = True
         try:
+            self._stop_scan_line_animation()
             await self._stop_scan_camera()
             if self._scan_qr_field is not None:
                 self._scan_qr_field.value = payload
