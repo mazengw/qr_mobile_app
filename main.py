@@ -20,9 +20,11 @@ from app.api import ApiError, VaultAPI
 from app.i18n import LANG_AR, LANG_EN, normalize_lang, t
 from app.menu_data import (
     ALLERGENS,
+    BUSINESS_STYLES,
     COLOR_PRESETS,
     CURRENCY_OPTIONS,
     SOCIAL_NETWORKS,
+    business_style_icons,
     clone_menu,
     empty_product,
     empty_section,
@@ -31,6 +33,7 @@ from app.menu_data import (
     mailto_href,
     maps_href,
     normalize_ampm_time,
+    normalize_business_style,
     normalize_menu_data,
     social_href,
     tel_href,
@@ -2055,7 +2058,18 @@ class QRVaultApp:
             badges.insert(0, chip(self._("public"), C.accent))
         if (s.get("kind") or "vault") == "menu":
             badges.insert(0, chip(self._("menu_badge"), C.primary))
-        leading_icon = ft.Icons.RESTAURANT_MENU if (s.get("kind") or "vault") == "menu" else ft.Icons.QR_CODE_2
+        if (s.get("kind") or "vault") == "menu":
+            style = normalize_business_style(
+                (s.get("menu_data") or {}).get("business_style")
+                if isinstance(s.get("menu_data"), dict)
+                else None
+            )
+            leading_icon = self._resolve_icon(
+                business_style_icons(style).get("home"),
+                ft.Icons.STORE,
+            )
+        else:
+            leading_icon = ft.Icons.QR_CODE_2
         return ft.Container(
             content=ft.ListTile(
                 leading=ft.Container(
@@ -3710,6 +3724,17 @@ class QRVaultApp:
         data = menu if menu is not None else self._menu_payload()
         return bool(data.get("cart_enabled", True))
 
+    def _resolve_icon(self, name: str, fallback=ft.Icons.STORE):
+        return getattr(ft.Icons, str(name or "").strip(), None) or fallback
+
+    def _menu_icons(self, menu: dict | None = None) -> dict:
+        data = menu if menu is not None else self._menu_payload()
+        names = business_style_icons(data.get("business_style"))
+        return {
+            key: self._resolve_icon(icon_name, ft.Icons.STORE)
+            for key, icon_name in names.items()
+        }
+
     def _menu_product_meta(self, prod: dict, section_name: str, *, currency: str) -> dict:
         price_raw = str(prod.get("price") or "").strip()
         return {
@@ -4120,6 +4145,7 @@ class QRVaultApp:
         self._set_back(self.go_menu)
         s = self.current_storage or {}
         menu = self._menu_payload()
+        icons = self._menu_icons(menu)
         primary = menu.get("primary_color") or C.primary
         currency = menu.get("currency") or "SYP"
         restaurant = menu.get("restaurant_name") or s.get("title") or self._("menu_badge")
@@ -4145,7 +4171,7 @@ class QRVaultApp:
                             primary_button(
                                 self._("cart_back_menu"),
                                 lambda e: self.go_menu(),
-                                ft.Icons.RESTAURANT_MENU,
+                                icons["empty"],
                                 expand=False,
                             ),
                         ],
@@ -4301,7 +4327,7 @@ class QRVaultApp:
                         ghost_button(
                             self._("cart_back_menu"),
                             lambda e: self.go_menu(),
-                            ft.Icons.RESTAURANT_MENU,
+                            icons["empty"],
                             expand=True,
                         ),
                         primary_button(
@@ -4331,6 +4357,7 @@ class QRVaultApp:
             user_id=(self.session.user or {}).get("id"),
         )
         menu = self._menu_payload()
+        icons = self._menu_icons(menu)
         primary = menu.get("primary_color") or C.primary
         can_write = self._can_write()
         cart_enabled = self._menu_cart_enabled(menu)
@@ -4351,7 +4378,7 @@ class QRVaultApp:
             width=None,
             height=210,
             radius=0,
-            fallback_icon=ft.Icons.RESTAURANT,
+            fallback_icon=icons["cover"],
         )
         cover_box.expand = True
         cover_box.bgcolor = primary
@@ -4363,7 +4390,7 @@ class QRVaultApp:
             width=72,
             height=72,
             radius=36,
-            fallback_icon=ft.Icons.STOREFRONT,
+            fallback_icon=icons["logo"],
         )
         logo_box.border = ft.Border.all(3, "#FFFFFF")
         logo_box.shadow = ft.BoxShadow(blur_radius=16, color="#00000066", offset=ft.Offset(0, 4))
@@ -4597,7 +4624,7 @@ class QRVaultApp:
                 card(
                     ft.Column(
                         [
-                            ft.Icon(ft.Icons.RESTAURANT_MENU, size=36, color=primary),
+                            ft.Icon(icons["empty"], size=36, color=primary),
                             muted(self._("menu_empty")),
                         ],
                         spacing=8,
@@ -4631,7 +4658,7 @@ class QRVaultApp:
                     width=None,
                     height=112,
                     radius=14,
-                    fallback_icon=ft.Icons.FASTFOOD_OUTLINED,
+                    fallback_icon=icons["product"],
                 )
                 photo.expand = True
                 if photo_id:
@@ -4893,6 +4920,19 @@ class QRVaultApp:
             color=C.text,
             expand=True,
         )
+        style_dd = ft.Dropdown(
+            label=self._("business_style"),
+            value=normalize_business_style(draft.get("business_style")),
+            options=[
+                ft.dropdown.Option(key, self._(f"business_style_{key}"))
+                for key, _label in BUSINESS_STYLES
+            ],
+            border_radius=14,
+            bgcolor=C.surface_alt,
+            border_color=C.border,
+            color=C.text,
+            expand=True,
+        )
         social = draft.get("social") if isinstance(draft.get("social"), dict) else {}
         social_fields = {
             key: self._editor_text_field(self._(f"social_{key}"), social.get(key) or "")
@@ -4935,6 +4975,7 @@ class QRVaultApp:
                 lng=draft.get("lng"),
             )
             draft["currency"] = currency_dd.value or "SYP"
+            draft["business_style"] = normalize_business_style(style_dd.value)
             draft["social"] = {
                 key: (field.value or "").strip()
                 for key, field in social_fields.items()
@@ -5435,6 +5476,7 @@ class QRVaultApp:
                 ),
                 name_field,
                 desc_field,
+                style_dd,
                 currency_dd,
                 card(
                     ft.Row(
@@ -6889,14 +6931,15 @@ class QRVaultApp:
             return
 
         media = self._build_full_media(name, path, content_type)
+        is_img = is_image(content_type, name)
         frame = ft.Container(
             content=media,
             expand=True,
-            bgcolor=C.surface,
-            border=ft.Border.all(1, C.border),
-            border_radius=16,
+            bgcolor=C.bg if is_img else C.surface,
+            border=None if is_img else ft.Border.all(1, C.border),
+            border_radius=0 if is_img else 16,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            padding=8,
+            padding=0 if is_img else 8,
         )
         self.set_view(
             ft.Column(
@@ -7129,6 +7172,8 @@ class QRVaultApp:
             )
 
         if is_image(ct, name):
+            # COVER fills the viewport (no letterbox bars). InteractiveViewer
+            # still allows pinch-zoom / pan; clip hides any overflow.
             return ft.Container(
                 content=ft.InteractiveViewer(
                     expand=True,
@@ -7137,16 +7182,16 @@ class QRVaultApp:
                     pan_enabled=True,
                     scale_enabled=True,
                     constrained=True,
-                    boundary_margin=ft.Margin.all(40),
+                    boundary_margin=ft.Margin.all(0),
                     content=ft.Image(
                         src=str(path),
-                        fit=ft.BoxFit.CONTAIN,
+                        fit=ft.BoxFit.COVER,
                         expand=True,
                     ),
                 ),
                 expand=True,
                 alignment=ft.Alignment.CENTER,
-                bgcolor="#000000",
+                bgcolor=C.bg,
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
             )
 

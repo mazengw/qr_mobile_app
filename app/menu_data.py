@@ -55,6 +55,114 @@ CURRENCY_OPTIONS: list[tuple[str, str]] = [
     ("LBP", "ل.ل"),
 ]
 
+# Visual icon theme for digital menus (not only restaurants).
+# Keys are stable IDs stored in menu_data["business_style"].
+BUSINESS_STYLES: list[tuple[str, str]] = [
+    ("restaurant", "Restaurant"),
+    ("cafe", "Cafe"),
+    ("bakery", "Bakery"),
+    ("grocery", "Grocery"),
+    ("library", "Library / Stationery"),
+    ("pharmacy", "Pharmacy"),
+    ("fashion", "Fashion"),
+    ("electronics", "Electronics"),
+    ("beauty", "Beauty"),
+    ("gym", "Gym"),
+    ("generic", "Store / General"),
+]
+
+# Icon names resolve to flet.Icons.* in the mobile client.
+BUSINESS_STYLE_ICONS: dict[str, dict[str, str]] = {
+    "restaurant": {
+        "cover": "RESTAURANT",
+        "logo": "STOREFRONT",
+        "product": "FASTFOOD_OUTLINED",
+        "empty": "RESTAURANT_MENU",
+        "home": "RESTAURANT_MENU",
+    },
+    "cafe": {
+        "cover": "LOCAL_CAFE",
+        "logo": "COFFEE",
+        "product": "LOCAL_CAFE",
+        "empty": "LOCAL_CAFE",
+        "home": "LOCAL_CAFE",
+    },
+    "bakery": {
+        "cover": "CAKE",
+        "logo": "CAKE",
+        "product": "CAKE",
+        "empty": "CAKE",
+        "home": "CAKE",
+    },
+    "grocery": {
+        "cover": "LOCAL_GROCERY_STORE",
+        "logo": "STOREFRONT",
+        "product": "SHOPPING_BASKET",
+        "empty": "LOCAL_GROCERY_STORE",
+        "home": "LOCAL_GROCERY_STORE",
+    },
+    "library": {
+        "cover": "MENU_BOOK",
+        "logo": "AUTO_STORIES",
+        "product": "EDIT_NOTE",
+        "empty": "MENU_BOOK",
+        "home": "MENU_BOOK",
+    },
+    "pharmacy": {
+        "cover": "LOCAL_PHARMACY",
+        "logo": "MEDICAL_SERVICES",
+        "product": "LOCAL_PHARMACY",
+        "empty": "LOCAL_PHARMACY",
+        "home": "LOCAL_PHARMACY",
+    },
+    "fashion": {
+        "cover": "CHECKROOM",
+        "logo": "SHOPPING_BAG",
+        "product": "CHECKROOM",
+        "empty": "CHECKROOM",
+        "home": "CHECKROOM",
+    },
+    "electronics": {
+        "cover": "DEVICES",
+        "logo": "PHONE_ANDROID",
+        "product": "DEVICES",
+        "empty": "DEVICES",
+        "home": "DEVICES",
+    },
+    "beauty": {
+        "cover": "SPA",
+        "logo": "FACE",
+        "product": "SPA",
+        "empty": "SPA",
+        "home": "SPA",
+    },
+    "gym": {
+        "cover": "FITNESS_CENTER",
+        "logo": "SPORTS",
+        "product": "FITNESS_CENTER",
+        "empty": "FITNESS_CENTER",
+        "home": "FITNESS_CENTER",
+    },
+    "generic": {
+        "cover": "STORE",
+        "logo": "STOREFRONT",
+        "product": "INVENTORY_2",
+        "empty": "CATEGORY",
+        "home": "STORE",
+    },
+}
+
+
+def normalize_business_style(value: Any) -> str:
+    key = str(value or "restaurant").strip().lower()
+    allowed = {item[0] for item in BUSINESS_STYLES}
+    return key if key in allowed else "restaurant"
+
+
+def business_style_icons(style: Any) -> dict[str, str]:
+    key = normalize_business_style(style)
+    return dict(BUSINESS_STYLE_ICONS.get(key) or BUSINESS_STYLE_ICONS["restaurant"])
+
 
 def new_id() -> str:
     return uuid.uuid4().hex[:10]
@@ -123,6 +231,7 @@ def normalize_menu_data(raw: Any, *, restaurant_name: str = "", description: str
         "primary_color": str(data.get("primary_color") or "#0D9488"),
         "secondary_color": str(data.get("secondary_color") or "#0F172A"),
         "cart_enabled": bool(data.get("cart_enabled", True)),
+        "business_style": normalize_business_style(data.get("business_style")),
         "sections": sections,
     }
 
