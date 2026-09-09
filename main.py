@@ -300,8 +300,12 @@ class QRVaultApp:
         self._home_invites: ft.Column | None = None
         self._home_offline_banner: ft.Container | None = None
         self._home_pull_indicator: ft.Container | None = None
+        self._home_pull_spinner = None
+        self._home_pull_label: ft.Text | None = None
+        self._home_scroll = None
         self._home_refreshing = False
         self._home_pull_distance = 0.0
+        self._home_at_top = True
         self._storage_files_cache: list[dict] = []
         self._storage_notes_cache: list[dict] = []
         self._vault_visible_items: list[dict] = []
@@ -2004,16 +2008,16 @@ class QRVaultApp:
         self._ensure_profile_drawer()
         self._home_refreshing = False
         self._home_pull_distance = 0.0
+        self._home_at_top = True
 
+        # Shrink-wrapped reorder list inside a parent scroller so Android
+        # overscroll / pull-to-refresh works like a normal APK list.
         list_view = ft.ReorderableListView(
-            expand=True,
             spacing=0,
             padding=0,
-            # Mobile: long-press item to drag. Desktop: small overlay handle (no layout width).
+            height=160,
             show_default_drag_handles=True,
             on_reorder=self._on_home_reorder,
-            on_scroll=self._on_home_scroll,
-            scroll_interval=40,
         )
         self._home_list = list_view
         filter_row = ft.Row(spacing=8, visible=False)
@@ -2052,17 +2056,41 @@ class QRVaultApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+        pull_spinner = ft.CupertinoActivityIndicator(
+            radius=12,
+            color=C.primary,
+            animating=True,
+        )
+        self._home_pull_spinner = pull_spinner
+        pull_label = ft.Text(
+            self._("home_refreshing"),
+            size=12,
+            color=C.text_muted,
+            visible=False,
+        )
+        self._home_pull_label = pull_label
         pull_indicator = ft.Container(
             height=0,
             visible=False,
             alignment=ft.Alignment.CENTER,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            animate=ft.Animation(160, ft.AnimationCurve.EASE_OUT),
-            content=ft.ProgressRing(
-                width=22,
-                height=22,
-                color=C.primary,
-                stroke_width=2.5,
+            animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
+            content=ft.Container(
+                bgcolor=C.surface,
+                border=ft.Border.all(1, C.border),
+                border_radius=999,
+                padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                shadow=ft.BoxShadow(
+                    blur_radius=12,
+                    color=C.shadow,
+                    offset=ft.Offset(0, 4),
+                ),
+                content=ft.Row(
+                    [pull_spinner, pull_label],
+                    spacing=10,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
         )
         self._home_pull_indicator = pull_indicator
@@ -2072,66 +2100,122 @@ class QRVaultApp:
         offline_banner = ft.Container(visible=False)
         self._home_offline_banner = offline_banner
 
-        self.set_view(
-            ft.Column(
-                [
-                    header,
-                    ft.Row(
+        scroll_body = ft.Column(
+            [
+                ft.GestureDetector(
+                    content=ft.Column(
                         [
-                            primary_button(
-                                self._("scan_qr"),
-                                lambda e: self.go_scan(),
-                                ft.Icons.QR_CODE_SCANNER,
-                                expand=True,
+                            header,
+                            ft.Row(
+                                [
+                                    primary_button(
+                                        self._("scan_qr"),
+                                        lambda e: self.go_scan(),
+                                        ft.Icons.QR_CODE_SCANNER,
+                                        expand=True,
+                                    ),
+                                ],
                             ),
                         ],
+                        spacing=14,
+                        tight=True,
                     ),
-                    offline_banner,
-                    invites,
-                    filter_row,
-                    pull_indicator,
-                    ft.Container(content=list_view, expand=True),
-                ],
-                spacing=14,
-                expand=True,
-            ),
+                    on_vertical_drag_update=self._on_home_pull_drag_update,
+                    on_vertical_drag_end=self._on_home_pull_drag_end,
+                ),
+                offline_banner,
+                invites,
+                filter_row,
+                pull_indicator,
+                list_view,
+                # Extra space so short lists remain scrollable → Android overscroll works.
+                ft.Container(height=220),
+            ],
+            spacing=14,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+            on_scroll=self._on_home_scroll,
+            scroll_interval=16,
+        )
+        self._home_scroll = scroll_body
+
+        self.set_view(
+            scroll_body,
             ai_fab=True,
             ai_home=True,
         )
         self.page.run_task(self._refresh_home, list_view)
 
+    def _set_home_list_height(self, item_count: int):
+        list_view = self._home_list
+        if list_view is None:
+            return
+        # Match card row height so the parent Column owns scrolling/overscroll.
+        list_view.height = max(1, int(item_count)) * 82 + 12
+
     def _update_home_pull_indicator(self, distance: float):
         ind = self._home_pull_indicator
         if ind is None:
             return
-        if self._home_refreshing:
-            height = 44.0
+        dist = float(distance or 0)
+        refreshing = self._home_refreshing
+        if refreshing:
+            height = 52.0
         else:
-            height = max(0.0, min(56.0, float(distance or 0)))
+            height = max(0.0, min(72.0, dist * 0.85))
         ind.height = height
-        ind.visible = height > 6 or self._home_refreshing
+        ind.visible = height > 8 or refreshing
+        label = self._home_pull_label
+        if label is not None:
+            if refreshing:
+                label.visible = True
+                label.value = self._("home_refreshing")
+            elif dist >= 64:
+                label.visible = True
+                label.value = self._("refresh")
+            else:
+                label.visible = False
+        spinner = self._home_pull_spinner
+        if spinner is not None:
+            # While dragging: show progress; while loading: spin.
+            try:
+                spinner.animating = bool(refreshing or dist > 12)
+                if not refreshing and dist > 0:
+                    spinner.progress = min(1.0, dist / 72.0)
+                else:
+                    spinner.progress = None
+            except Exception:
+                pass
         try:
             ind.update()
         except Exception:
-            pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
     def _on_home_scroll(self, e: ft.OnScrollEvent):
         if self._home_refreshing:
             return
         pixels = float(getattr(e, "pixels", 0) or 0)
         overscroll = float(getattr(e, "overscroll", 0) or 0)
+        scroll_delta = getattr(e, "scroll_delta", None)
         event_type = getattr(e, "event_type", None)
-        at_top = pixels <= 0.8
+        at_top = pixels <= 1.0
+        self._home_at_top = at_top
 
         if event_type == ft.ScrollType.OVERSCROLL and at_top and overscroll > 0:
             self._home_pull_distance = max(self._home_pull_distance, overscroll)
             self._update_home_pull_indicator(self._home_pull_distance)
             return
 
-        if event_type == ft.ScrollType.UPDATE and at_top and overscroll > 0:
-            self._home_pull_distance = overscroll
-            self._update_home_pull_indicator(overscroll)
-            return
+        if at_top and scroll_delta is not None and float(scroll_delta) < 0:
+            # Finger dragged down while already at top.
+            self._home_pull_distance = min(
+                120.0,
+                self._home_pull_distance + abs(float(scroll_delta)),
+            )
+            self._update_home_pull_indicator(self._home_pull_distance)
 
         if event_type == ft.ScrollType.END:
             if at_top and self._home_pull_distance >= 64:
@@ -2141,10 +2225,33 @@ class QRVaultApp:
                 self._update_home_pull_indicator(0)
             return
 
-        if pixels > 2:
-            if self._home_pull_distance:
-                self._home_pull_distance = 0.0
-                self._update_home_pull_indicator(0)
+        if pixels > 2 and self._home_pull_distance:
+            self._home_pull_distance = 0.0
+            self._update_home_pull_indicator(0)
+
+    def _on_home_pull_drag_update(self, e):
+        if self._home_refreshing:
+            return
+        delta = getattr(e, "local_delta", None) or getattr(e, "global_delta", None)
+        dy = float(getattr(delta, "y", 0) or 0) if delta is not None else 0.0
+        if dy == 0:
+            return
+        # Pull down (finger moves down) while near top of the page.
+        if dy > 0 and self._home_at_top:
+            self._home_pull_distance = min(120.0, self._home_pull_distance + dy)
+            self._update_home_pull_indicator(self._home_pull_distance)
+        elif dy < 0 and self._home_pull_distance > 0:
+            self._home_pull_distance = max(0.0, self._home_pull_distance + dy)
+            self._update_home_pull_indicator(self._home_pull_distance)
+
+    def _on_home_pull_drag_end(self, _e=None):
+        if self._home_refreshing:
+            return
+        if self._home_at_top and self._home_pull_distance >= 64:
+            self.page.run_task(self._pull_refresh_home)
+        else:
+            self._home_pull_distance = 0.0
+            self._update_home_pull_indicator(0)
 
     async def _pull_refresh_home(self):
         if self._home_refreshing:
@@ -2153,9 +2260,16 @@ class QRVaultApp:
         if list_view is None:
             return
         self._home_refreshing = True
-        self._home_pull_distance = 0.0
-        self._update_home_pull_indicator(44)
+        self._home_pull_distance = 72.0
+        self._update_home_pull_indicator(72)
         try:
+            # Nudge scroll back to top while the indicator is visible.
+            scroll = getattr(self, "_home_scroll", None)
+            if scroll is not None:
+                try:
+                    await scroll.scroll_to(offset=0, duration=200)
+                except Exception:
+                    pass
             await self._refresh_home(list_view)
             self.toast(self._("home_refreshed"))
         finally:
@@ -2254,13 +2368,10 @@ class QRVaultApp:
                     padding=10,
                     border_radius=12,
                 ),
-                title=ft.Text(s.get("title") or self._("storage_fallback", qr=s.get("qr_code")), color=C.text, weight=ft.FontWeight.W_600),
-                subtitle=ft.Text(
-                    f"QR: {s.get('qr_code')}  ·  {self._('files_count', n=s.get('file_count', 0))}  ·  {self._perm_text(s.get('my_permission'))}"
-                    if (s.get("kind") or "vault") != "menu"
-                    else f"QR: {s.get('qr_code')}  ·  {self._('menu_badge')}  ·  {self._perm_text(s.get('my_permission'))}",
-                    color=C.text_muted,
-                    size=12,
+                title=ft.Text(
+                    s.get("title") or self._("storage_fallback", qr=s.get("qr_code")),
+                    color=C.text,
+                    weight=ft.FontWeight.W_600,
                 ),
                 trailing=ft.Row(badges, spacing=6, tight=True) if len(badges) > 1 else badges[0],
                 on_click=lambda e, sid=s["id"]: self.page.run_task(self._open_storage, sid),
@@ -2268,7 +2379,7 @@ class QRVaultApp:
             bgcolor=C.surface,
             border=border,
             border_radius=16,
-            padding=ft.Padding.only(left=2, right=8, top=1, bottom=1) if is_shared else ft.Padding.only(right=6),
+            padding=ft.Padding.only(left=2, right=8, top=4, bottom=4) if is_shared else ft.Padding.only(right=6, top=2, bottom=2),
         )
 
     def _render_home_storages(self):
@@ -2289,10 +2400,12 @@ class QRVaultApp:
 
         if not items:
             list_view.controls = [muted("No storages in this filter.")]
+            self._set_home_list_height(1)
         else:
             list_view.controls = [
                 self._wrap_list_item(self._storage_card(s), reorder=can_reorder) for s in items
             ]
+            self._set_home_list_height(len(items))
         self.page.update()
 
     def _on_home_reorder(self, e: ft.OnReorderEvent):
@@ -2436,6 +2549,7 @@ class QRVaultApp:
         list_view.controls = [
             ft.Row([ft.ProgressRing(width=22, height=22, color=C.primary)], alignment=ft.MainAxisAlignment.CENTER)
         ]
+        self._set_home_list_height(1)
         self.page.update()
         offline = False
         try:
@@ -2459,6 +2573,7 @@ class QRVaultApp:
                     muted("Failed to load storages"),
                     muted("Open a vault while online once, then try again offline."),
                 ]
+                self._set_home_list_height(2)
                 self.page.update()
                 return
 
@@ -2490,6 +2605,7 @@ class QRVaultApp:
                     )
                 )
             ]
+            self._set_home_list_height(3)
             self.page.update()
             return
 
